@@ -1,0 +1,323 @@
+--- a/include/server/cuda_server.hpp
++++ b/include/server/cuda_server.hpp
+@@ -2,6 +2,7 @@
+ #define  INCLUDE_CUDA_SERVER_HPP_
+ 
+ #include <chrono>
++#include <unordered_map>
+ #include <algorithm>
+ #include <stdexcept>
+ 
+@@ -27,6 +28,7 @@
+ };
+ 
+ const int reqTimeout = 5000; // in milliseconds
++const int timeoutSweepInterval = 200; // ms between per-client timeout sweeps
+ 
+ const set<QueryType> wait_query_types = {QueryType::cuBLAS_cublasSgemm, QueryType::cuBLAS_cublasSgemmStridedBatched, 
+                                             QueryType::cudnnConvolutionForward, QueryType::cudnnBatchNormalizationForwardInference, 
+@@ -108,13 +110,12 @@
+         cublasCreate(&cublas_handle_);
+         cudnnCreate(&cudnn_handle_);
+ 
+-        active_func_ = non_active_func;
+-        load_model_flag_ = LoadModelFlag_None;
++        // client_state_ entries default-construct to
++        // {non_active_func, LoadModelFlag_None, now()}.
+ 
+         cudaStreamCreateWithPriority(&default_stream_, cudaStreamNonBlocking, -1);
+         cudaStreamCreateWithPriority(&secondary_stream_, cudaStreamNonBlocking, -1);
+ 
+-        req_start_ = std::chrono::system_clock::now();
+         auto req_cur = std::chrono::system_clock::now();
+ 
+         while (true) {
+@@ -222,8 +223,9 @@
+                 }
+                 else if (sig == ExecutorSignal_Startup) {
+                     pushers_.create(get_client_addr(stoi(func)));
+-                    active_func_ = func;
+-                    load_model_flag_ = LoadModelFlag_LoadModel;
++                    auto &st = cstate(func);
++                    st.func_ = func;
++                    st.load_model_flag_ = LoadModelFlag_LoadModel;
+                     mem_manager_.set_track_model_memory(func);
+                 }
+                 else if (sig == ExecutorSignal_Execute) {
+@@ -232,10 +234,10 @@
+                         std::cout << "Server " << id_  << " -- warning: model " << func << " not ready in allocation" << std::endl;
+                         log_->warn("Model {} not ready for execution", func);
+                     }
+-                    active_func_ = func;
+-                    load_model_flag_ = LoadModelFlag_None;
+-
+-                    req_start_ = std::chrono::system_clock::now();
++                    auto &st = cstate(func);
++                    st.func_ = func;
++                    st.load_model_flag_ = LoadModelFlag_None;
++                    st.req_start_ = std::chrono::system_clock::now();
+                 }
+                 else if (sig == ExecutorSignal_Unload) {
+                     mem_manager_.evict_model(func);
+@@ -254,12 +256,25 @@
+                 executor_resp_block_queue_->enqueue(0);
+             }
+ 
+-            if (active_func_ != non_active_func && load_model_flag_ == LoadModelFlag_None) {
+-                // check request timeout for Execute
+-                req_cur = std::chrono::system_clock::now();
+-                if (std::chrono::duration_cast<std::chrono::milliseconds>(req_cur - req_start_).count() > reqTimeout) {
+-                    log_->warn("Request timeout for func {}", active_func_);
+-                    send_complete_signal();
++            // Check request timeout for Execute, per client. Upstream
++            // tested one shared active_func_ and could early-out for free;
++            // sweeping every client on every turn of this busy poll would add
++            // real CPU cost at 140 clients a server, and this figure measures
++            // latency. reqTimeout is 5 s, so a 200 ms sweep is ample.
++            req_cur = std::chrono::system_clock::now();
++            if (std::chrono::duration_cast<std::chrono::milliseconds>(req_cur - last_timeout_sweep_).count() >= timeoutSweepInterval) {
++                last_timeout_sweep_ = req_cur;
++                for (auto &kv : client_state_) {
++                    auto &st = kv.second;
++                    if (st.func_ == non_active_func || st.load_model_flag_ != LoadModelFlag_None) {
++                        continue;
++                    }
++                    if (std::chrono::duration_cast<std::chrono::milliseconds>(req_cur - st.req_start_).count() > reqTimeout) {
++                        log_->warn("Request timeout for func {}", st.func_);
++                        // Mutates the mapped value only -- no insert, so this
++                        // cannot invalidate the iterator.
++                        send_complete_signal(kv.first);
++                    }
+                 }
+             }
+ 
+@@ -284,17 +299,27 @@
+         executor_resp_block_queue_->dequeue();
+     }
+ 
+-    void send_complete_signal() {
++    void send_complete_signal(int client_id) {
++        auto it = client_state_.find(client_id);
++        if (it == client_state_.end()) {
++            // No Startup/Execute seen for this client yet. Upstream would have
++            // acted on whatever the shared members happened to hold; there is
++            // nothing client-specific to complete, but the controller still
++            // expects the notification.
++            controller_sync_queue->push(id_);
++            return;
++        }
++        auto &st = it->second;
+         // reset track flag
+-        if (load_model_flag_ == LoadModelFlag_TrackAccess) {
+-            load_model_flag_ = LoadModelFlag_None;
+-            mem_manager_.unset_track_model_memory(active_func_);
++        if (st.load_model_flag_ == LoadModelFlag_TrackAccess) {
++            st.load_model_flag_ = LoadModelFlag_None;
++            mem_manager_.unset_track_model_memory(st.func_);
+         }
+         else {
+             auto cur_time = std::chrono::system_clock::now();
+-            log_->info("Send complete signal for func {} time {}", active_func_, std::chrono::duration_cast<std::chrono::milliseconds>(cur_time - req_start_).count());
++            log_->info("Send complete signal for func {} time {}", st.func_, std::chrono::duration_cast<std::chrono::milliseconds>(cur_time - st.req_start_).count());
+         }
+-        active_func_ = non_active_func;
++        st.func_ = non_active_func;
+         controller_sync_queue->push(id_);
+     }
+ 
+@@ -513,9 +538,9 @@
+         auto C = reinterpret_cast<float*> (query.matrix_c());
+ 
+         memoryCheck(mem_manager_.try_insert_model_access(A));
+-        A = (float*) mem_manager_.get_cuda_addr(active_func_, (void*) A);
+-        B = (float*) mem_manager_.get_cuda_addr(active_func_, (void*) B);
+-        C = (float*) mem_manager_.get_cuda_addr(active_func_, (void*) C);
++        A = (float*) mem_manager_.get_cuda_addr(afunc(client_id), (void*) A);
++        B = (float*) mem_manager_.get_cuda_addr(afunc(client_id), (void*) B);
++        C = (float*) mem_manager_.get_cuda_addr(afunc(client_id), (void*) C);
+ 
+         auto stat = cublasSgemm(get_cublas_handle(query.handle()), transa, transb, query.m(), query.n(), query.k(), &alpha, A, query.lda(), B, query.ldb(), &beta, C, query.ldc());
+         log_->debug("Async: [cublas] cublasSgemmService");
+@@ -540,9 +565,9 @@
+         auto batchCount = query.count();
+ 
+         // memoryCheck(mem_manager_.try_insert_model_access(A));
+-        A = (float*) mem_manager_.get_cuda_addr(active_func_, (void*) A);
+-        B = (float*) mem_manager_.get_cuda_addr(active_func_, (void*) B);
+-        C = (float*) mem_manager_.get_cuda_addr(active_func_, (void*) C);
++        A = (float*) mem_manager_.get_cuda_addr(afunc(client_id), (void*) A);
++        B = (float*) mem_manager_.get_cuda_addr(afunc(client_id), (void*) B);
++        C = (float*) mem_manager_.get_cuda_addr(afunc(client_id), (void*) C);
+ 
+         auto stat = cublasSgemmStridedBatched(get_cublas_handle(query.handle()), transa, transb, query.m(), query.n(), query.k(), &alpha, A, query.lda(), strideA, B, query.ldb(), strideB, &beta, C, query.ldc(), strideC, batchCount);
+         log_->debug("Async: [cublas] cublasSgemmStridedBatchedService");
+@@ -724,11 +749,11 @@
+         size_t workspace_size = query.workspace_size();
+ 
+         memoryCheck(mem_manager_.try_insert_model_access(w));
+-        w = mem_manager_.get_cuda_addr(active_func_, w);
+-        x = mem_manager_.get_cuda_addr(active_func_, x);
+-        y = mem_manager_.get_cuda_addr(active_func_, y);
++        w = mem_manager_.get_cuda_addr(afunc(client_id), w);
++        x = mem_manager_.get_cuda_addr(afunc(client_id), x);
++        y = mem_manager_.get_cuda_addr(afunc(client_id), y);
+         // workspace can be 0 
+-        workspace = mem_manager_.get_cuda_addr(active_func_, workspace);
++        workspace = mem_manager_.get_cuda_addr(afunc(client_id), workspace);
+ 
+         cudnnCheck(cudnnConvolutionForward(get_cudnn_handle(query.handle()), &alpha, xDesc, x, wDesc, w, convDesc, algo, workspace, workspace_size, &beta, yDesc, y));
+         log_->debug("Async: [cudnn] cudnnConvolutionForwardService");
+@@ -759,12 +784,12 @@
+         memoryCheck(mem_manager_.try_insert_model_access(estimatedMean));
+         memoryCheck(mem_manager_.try_insert_model_access(estimatedVariance));
+ 
+-        bnScale = mem_manager_.get_cuda_addr(active_func_, bnScale);
+-        bnBias = mem_manager_.get_cuda_addr(active_func_, bnBias);
+-        estimatedMean = mem_manager_.get_cuda_addr(active_func_, estimatedMean);
+-        estimatedVariance = mem_manager_.get_cuda_addr(active_func_, estimatedVariance);
+-        x = mem_manager_.get_cuda_addr(active_func_, x);
+-        y = mem_manager_.get_cuda_addr(active_func_, y);
++        bnScale = mem_manager_.get_cuda_addr(afunc(client_id), bnScale);
++        bnBias = mem_manager_.get_cuda_addr(afunc(client_id), bnBias);
++        estimatedMean = mem_manager_.get_cuda_addr(afunc(client_id), estimatedMean);
++        estimatedVariance = mem_manager_.get_cuda_addr(afunc(client_id), estimatedVariance);
++        x = mem_manager_.get_cuda_addr(afunc(client_id), x);
++        y = mem_manager_.get_cuda_addr(afunc(client_id), y);
+ 
+         cudnnCheck(cudnnBatchNormalizationForwardInference(get_cudnn_handle(query.handle()), mode, &alpha, &beta, xDesc, x, yDesc, y, bnScaleBiasMeanVarDesc, bnScale, bnBias, estimatedMean, estimatedVariance, epsilon));
+         log_->debug("Async: [cudnn] cudnnBatchNormalizationForwardInferenceService");
+@@ -957,8 +982,8 @@
+         log_->debug("Response: cudaDeviceSynchronizeService");
+ 
+         // walkaround: signal to specify following memory requests not belonging to models
+-        load_model_flag_ = LoadModelFlag_TrackAccess;
+-        mem_manager_.init_model_readiness(active_func_);
++        lmflag(client_id) = LoadModelFlag_TrackAccess;
++        mem_manager_.init_model_readiness(afunc(client_id));
+     }   
+ 
+     // memory management
+@@ -967,7 +992,7 @@
+         query.ParseFromString(query_string);
+ 
+         auto size = query.size();
+-        auto ptr = mem_manager_.cudaMallocBackend(size, load_model_flag_==LoadModelFlag_LoadModel, active_func_);
++        auto ptr = mem_manager_.cudaMallocBackend(size, lmflag(client_id)==LoadModelFlag_LoadModel, afunc(client_id));
+ 
+         cudaMallocResponse resp;
+         resp.set_ptr(reinterpret_cast<uint64_t>(ptr));
+@@ -982,7 +1007,7 @@
+         query.ParseFromString(query_string);
+ 
+         auto ptr = reinterpret_cast<void*>(query.ptr());
+-        mem_manager_.cudaFreeBackend(ptr, active_func_);
++        mem_manager_.cudaFreeBackend(ptr, afunc(client_id));
+ 
+         genericResponse resp;
+         resp.set_error(0);
+@@ -1000,19 +1025,19 @@
+         cudaMemcpyResponse resp;
+         if (kind == cudaMemcpyKind::cudaMemcpyHostToDevice) {
+             auto dst = reinterpret_cast<void*>(query.dst());
+-            mem_manager_.cudaMemcpyBackendHtoD(dst, query.payload(), active_func_);
++            mem_manager_.cudaMemcpyBackendHtoD(dst, query.payload(), afunc(client_id));
+         }
+         else if (kind == cudaMemcpyKind::cudaMemcpyDeviceToHost) {
+             auto src = reinterpret_cast<void*>(query.src());
+             void* local_dst = malloc(query.count());
+-            mem_manager_.cudaMemcpyBackendDtoH(local_dst, src, query.count(), active_func_);
++            mem_manager_.cudaMemcpyBackendDtoH(local_dst, src, query.count(), afunc(client_id));
+             resp.set_payload(string(static_cast<char*>(local_dst), query.count()));
+             free(local_dst);
+         } 
+         else if (kind == cudaMemcpyKind::cudaMemcpyDeviceToDevice) {
+             auto src = reinterpret_cast<void*>(query.src());
+             auto dst = reinterpret_cast<void*>(query.dst());
+-            mem_manager_.cudaMemcpyBackendDtoD(dst, src, query.count(), active_func_);
++            mem_manager_.cudaMemcpyBackendDtoD(dst, src, query.count(), afunc(client_id));
+         } 
+         else {
+             log_->warn("Unsupported cudaMemcpyKind {}", kind);
+@@ -1033,20 +1058,20 @@
+ 
+         if (kind == cudaMemcpyKind::cudaMemcpyHostToDevice) {
+             auto dst = reinterpret_cast<void*>(query.dst());
+-            mem_manager_.cudaMemcpyAsyncBackendHtoD(dst, query.payload(), stream, load_model_flag_==LoadModelFlag_LoadModel, active_func_);
++            mem_manager_.cudaMemcpyAsyncBackendHtoD(dst, query.payload(), stream, lmflag(client_id)==LoadModelFlag_LoadModel, afunc(client_id));
+         }
+         else if (kind == cudaMemcpyKind::cudaMemcpyDeviceToHost) {
+             auto src = reinterpret_cast<void*>(query.src());
+             void* local_dst = malloc(query.count());
+-            mem_manager_.cudaMemcpyAsyncBackendDtoH(local_dst, src, query.count(), stream, active_func_);
+-            stream_async_msg_.push_back({active_func_, local_dst, query.count(), reinterpret_cast<void*>(query.dst())});
++            mem_manager_.cudaMemcpyAsyncBackendDtoH(local_dst, src, query.count(), stream, afunc(client_id));
++            stream_async_msg_.push_back({afunc(client_id), local_dst, query.count(), reinterpret_cast<void*>(query.dst())});
+             
+-            send_complete_signal();
++            send_complete_signal(client_id);
+         } 
+         else if (kind == cudaMemcpyKind::cudaMemcpyDeviceToDevice) {
+             auto src = reinterpret_cast<void*>(query.src());
+             auto dst = reinterpret_cast<void*>(query.dst());
+-            mem_manager_.cudaMemcpyAsyncBackendDtoD(dst, src, query.count(), stream, active_func_);
++            mem_manager_.cudaMemcpyAsyncBackendDtoD(dst, src, query.count(), stream, afunc(client_id));
+         } 
+         else {
+             std::cout << "Unsupported kind " << kind << std::endl;
+@@ -1062,7 +1087,7 @@
+         auto ptr = reinterpret_cast<void*>(query.ptr());
+         cudaStream_t stream = get_stream(query.stream());
+ 
+-        mem_manager_.cudaMemsetAsyncBackend(ptr, query.value(), query.count(), stream, active_func_);
++        mem_manager_.cudaMemsetAsyncBackend(ptr, query.value(), query.count(), stream, afunc(client_id));
+         
+         log_->debug("Async: cudaMemsetAsyncService");
+     }
+@@ -1241,7 +1266,9 @@
+             }
+ 
+             // first execution
+-            if (load_model_flag_ == LoadModelFlag_TrackAccess) {
++            auto &st = cstate(client_id);
++            auto &active_func_ = st.func_;   // local alias; see ClientState
++            if (st.load_model_flag_ == LoadModelFlag_TrackAccess) {
+                 if (kernel_model_access_loc().find(active_func_) == kernel_model_access_loc().end()) {
+                     kernel_model_access_loc()[active_func_] = {};
+                 }
+@@ -1368,13 +1395,33 @@
+     cudaStream_t default_stream_;
+     cudaStream_t secondary_stream_; // a general stream for non-blocking operations
+ 
+-    string active_func_;
++    // Per-client request state. Upstream held active_func_ /
++    // load_model_flag_ / req_start_ as one set of members shared by every
++    // client on this GPU, so a second client's Execute signal overwrote them
++    // while the first client's kernel launches were still being translated.
++    // Keyed by client_id, which is what `func` in an executor signal already
++    // is (see get_client_addr(stoi(func))).
++    struct ClientState {
++        string func_ = non_active_func;
++        int load_model_flag_ = LoadModelFlag_None;
++        std::chrono::time_point<std::chrono::system_clock> req_start_ =
++            std::chrono::system_clock::now();
++    };
++    std::unordered_map<int, ClientState> client_state_;
++    std::chrono::time_point<std::chrono::system_clock> last_timeout_sweep_ =
++        std::chrono::system_clock::now();
++
++    inline ClientState& cstate(int client_id) { return client_state_[client_id]; }
++    inline ClientState& cstate(const string& func) { return client_state_[stoi(func)]; }
++    // Shorthands so the ~40 translation sites stay a one-token change.
++    inline string& afunc(int client_id) { return client_state_[client_id].func_; }
++    inline int& lmflag(int client_id) { return client_state_[client_id].load_model_flag_; }
++
+     vector<AyncMessage> stream_async_msg_;
+ 
+     manager::MemoryManager mem_manager_;
+ 
+-    int load_model_flag_;
+-    std::chrono::time_point<std::chrono::system_clock> req_start_;
++    // load_model_flag_ and req_start_ now live in ClientState above.
+ 
+     // map<const void*, ordered_set<pair<int, int>>> kernel_model_access_loc_;
+ 
