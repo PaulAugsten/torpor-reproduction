@@ -1,0 +1,18 @@
+# torpor-client-nobatch.sif: client with queryBufferSize = 1 in async_sender.hpp,
+# i.e. no batching of CUDA calls (upstream evaluation/figure6/Figure6_README.md).
+# Used for Figure 6, "w/o batch".
+# Build from the repository root (see README.md in this directory):
+#   apptainer build torpor-client-nobatch.sif reproduction/images/torpor-client-nobatch.def
+Bootstrap: docker
+From: paulaugsten/torpor:client@sha256:33b7bf594069ccca61ee3c69d485542bc534895a57c91d9163cf4fb54932aec0
+
+%files
+    reproduction/images/patches/client-nobatch-async_sender.patch /tmp/client-nobatch.patch
+
+%post
+    patch -p1 -d /gpu-swap < /tmp/client-nobatch.patch
+    rm /tmp/client-nobatch.patch
+    cd /gpu-swap/build
+    make
+    cp src/client/librtclient.so /client_bin/librtclient.so
+    cp src/client/libmycuda.so /usr/lib/x86_64-linux-gnu/libcuda.so.1

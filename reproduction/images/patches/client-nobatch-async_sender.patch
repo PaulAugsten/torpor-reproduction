@@ -1,0 +1,11 @@
+--- a/include/client/async_sender.hpp
++++ b/include/client/async_sender.hpp
+@@ -10,7 +10,7 @@
+ 
+ zmq::context_t context(1);
+ 
+-const size_t queryBufferSize = 30;
++const size_t queryBufferSize = 1;
+ const size_t queryTimewindowInMicroseconds = 50;
+ 
+ using QueryQueue = queue<WapperQuery>;

@@ -1,0 +1,4 @@
+# torpor-client.sif: upstream client image, unchanged.
+#   apptainer build torpor-client.sif reproduction/images/torpor-client.def
+Bootstrap: docker
+From: paulaugsten/torpor:client@sha256:33b7bf594069ccca61ee3c69d485542bc534895a57c91d9163cf4fb54932aec0

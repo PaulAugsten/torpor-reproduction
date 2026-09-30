@@ -1,0 +1,61 @@
+--- a/include/server/memory_manager.hpp
++++ b/include/server/memory_manager.hpp
+@@ -351,23 +351,23 @@
+                 log_->info("Start transfering model {} from GPU {}", signal.second, src_gpu_id);
+                 auto start_t = std::chrono::system_clock::now();
+                 int param_count_host_to_pin = 0;
+-                if (src_gpu_id < 0) {
+-                    // local model to pinned memory
+-                    for (auto &ptr: model_repo_.model_access_order_map_[signal.second]){
+-                        if (model_param_readiness_[signal.second]->find(ptr) == model_param_readiness_[signal.second]->end() 
+-                                || model_param_readiness_[signal.second]->at(ptr).first >= ParamReadiness_Pinned) 
+-                            continue;
+-                        io_queue_->enqueue({signal.second, ptr, 
+-                                model_repo_.device_model_info_map_[server_id_][signal.second].param_virtual_to_cuda_[ptr].pinned_addr_, 
+-                                model_repo_.model_host_info_map_[signal.second].model_param_info_[ptr].host_addr_,
+-                                model_repo_.model_host_info_map_[signal.second].model_param_info_[ptr].size_});
+-                        // memcpy(model_repo_.device_model_info_map_[server_id_][signal.second].param_virtual_to_cuda_[ptr].pinned_addr_, 
+-                        //         model_repo_.model_host_info_map_[signal.second].model_param_info_[ptr].host_addr_,
+-                        //         model_repo_.model_host_info_map_[signal.second].model_param_info_[ptr].size_);
+-                        // model_param_readiness_[signal.second]->at(ptr) = std::make_pair(ParamReadiness_Pinned, nullptr);
+-                        param_count_host_to_pin ++;
+-                    }
+-                }
++                // if (src_gpu_id < 0) {
++                //     // local model to pinned memory
++                //     for (auto &ptr: model_repo_.model_access_order_map_[signal.second]){
++                //         if (model_param_readiness_[signal.second]->find(ptr) == model_param_readiness_[signal.second]->end() 
++                //                 || model_param_readiness_[signal.second]->at(ptr).first >= ParamReadiness_Pinned) 
++                //             continue;
++                //         io_queue_->enqueue({signal.second, ptr, 
++                //                 model_repo_.device_model_info_map_[server_id_][signal.second].param_virtual_to_cuda_[ptr].pinned_addr_, 
++                //                 model_repo_.model_host_info_map_[signal.second].model_param_info_[ptr].host_addr_,
++                //                 model_repo_.model_host_info_map_[signal.second].model_param_info_[ptr].size_});
++                //         // memcpy(model_repo_.device_model_info_map_[server_id_][signal.second].param_virtual_to_cuda_[ptr].pinned_addr_, 
++                //         //         model_repo_.model_host_info_map_[signal.second].model_param_info_[ptr].host_addr_,
++                //         //         model_repo_.model_host_info_map_[signal.second].model_param_info_[ptr].size_);
++                //         // model_param_readiness_[signal.second]->at(ptr) = std::make_pair(ParamReadiness_Pinned, nullptr);
++                //         param_count_host_to_pin ++;
++                //     }
++                // }
+                 auto to_pin_t = std::chrono::system_clock::now();
+ 
+                 // std::cout << "Server " << server_id_ << " -- pinned model " << signal.second << std::endl;
+@@ -382,12 +382,12 @@
+ 
+                     if (src_gpu_id < 0) {
+                         // wait for the param to be pinned
+-                        while (model_param_readiness_[signal.second]->at(ptr).first < ParamReadiness_Pinned) {
+-                            sync_io_queue_->dequeue();
+-                            wait_count++;
+-                        }
++                        // while (model_param_readiness_[signal.second]->at(ptr).first < ParamReadiness_Pinned) {
++                        //     sync_io_queue_->dequeue();
++                        //     wait_count++;
++                        // }
+                         cudaMemcpyAsync(model_repo_.device_model_info_map_[server_id_][signal.second].param_virtual_to_cuda_[ptr].cuda_addr_, 
+-                                        model_repo_.device_model_info_map_[server_id_][signal.second].param_virtual_to_cuda_[ptr].pinned_addr_, 
++                                        model_repo_.model_host_info_map_[signal.second].model_param_info_[ptr].host_addr_,
+                                         model_repo_.model_host_info_map_[signal.second].model_param_info_[ptr].size_, cudaMemcpyHostToDevice, trans_stream_[server_id_]);
+                     }
+                     else {

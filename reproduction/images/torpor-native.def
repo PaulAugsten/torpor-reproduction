@@ -1,0 +1,4 @@
+# torpor-native.sif: upstream native image, unchanged.
+#   apptainer build torpor-native.sif reproduction/images/torpor-native.def
+Bootstrap: docker
+From: paulaugsten/torpor:native@sha256:148a8b360fa1cdfc518128b485b87cf776a78f56151481ceb3a6298b47db46c9

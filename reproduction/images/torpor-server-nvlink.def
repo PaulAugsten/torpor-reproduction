@@ -1,0 +1,15 @@
+# torpor-server-nvlink.sif: torpor-server plus upstream's NVLink controller.hpp
+# (evaluation2/table4/controller.hpp). Used for Table 4, Swap-NVLink column.
+# Build from the repository root (see README.md in this directory):
+#   apptainer build torpor-server-nvlink.sif reproduction/images/torpor-server-nvlink.def
+Bootstrap: docker
+From: paulaugsten/torpor:server@sha256:0b6767fc116160b396c70c375a3b97e13494803358485c739917b17613898e8c
+
+%files
+    include/server/model_repo.hpp /gpu-swap/include/server/model_repo.hpp
+    evaluation2/table4/controller.hpp /gpu-swap/include/server/controller.hpp
+
+%post
+    cd /gpu-swap/build
+    make server
+    cp target/server /server_bin/server
