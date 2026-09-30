@@ -5,6 +5,7 @@
 #include "utils.hpp"
 #include "safe_ptr.hpp"
 #include <cstdlib>
+#include <mutex>
 
 namespace server {
 namespace manager {
@@ -70,6 +71,20 @@ public:
         static ModelRepo repo;
         return repo;
     }
+
+    // This is a Meyer's singleton: ONE instance shared process-wide across
+    // every GPU's CUDAExecutor (main RPC-dispatch thread), every GPU's
+    // transfer_model() background thread, and (through device_model_info_map_
+    // being read cross-GPU for P2P transfers) across GPUs too. Its maps
+    // (device_model_info_map_, model_host_info_map_, model_access_order_map_,
+    // etc.) are plain std::map/std::vector/std::set with zero synchronization
+    // anywhere in the original codebase -- concurrent mutation from these
+    // different threads is undefined behavior regardless of whether the keys
+    // they touch happen to differ, since insertion can rebalance the whole
+    // container. This mutex is taken by callers at natural request/transfer
+    // boundaries (see cuda_server.hpp's send_query() and memory_manager.hpp's
+    // transfer_model()) to serialize all access.
+    std::recursive_mutex mutex_;
 
     void init_device_info(int device_id) {
         device_model_info_map_[device_id] = {};

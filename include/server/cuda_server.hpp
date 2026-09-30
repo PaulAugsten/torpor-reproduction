@@ -4,6 +4,11 @@
 #include <chrono>
 #include <algorithm>
 #include <stdexcept>
+#include <pthread.h>
+#include <sched.h>
+#include <fstream>
+#include <sstream>
+#include <cctype>
 
 #include "cuda_common.hpp"
 #include "utils.hpp"
@@ -84,14 +89,62 @@ public:
 
     ~CUDAExecutor() {
         mem_manager_.destroy_trans_thread();
-        cublasDestroy(cublas_handle_);
-        cudnnDestroy(cudnn_handle_);
+        for (auto &kv : client_cublas_handle_) cublasDestroy(kv.second);
+        for (auto &kv : client_cudnn_handle_) cudnnDestroy(kv.second);
+    }
+
+private:
+    // Pin this executor's thread to the CPU cores local to its GPU's PCI
+    // NUMA domain (same set nvidia-smi topo -m reports as "CPU Affinity").
+    // The executor loop sequentially dispatches every intercepted CUDA/
+    // cuDNN/cuBLAS call for its GPU (thousands per inference), so cross-NUMA
+    // scheduling drift on this thread adds a per-dispatch memory penalty
+    // multiplied by that whole volume. No-ops silently if PCI/sysfs info
+    // isn't available (e.g. non-Linux, or driver doesn't expose it).
+    void pin_to_local_numa_cpus() {
+        char pci_bus_id[32] = {0};
+        if (cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), id_) != cudaSuccess) {
+            return;
+        }
+        string bus_id(pci_bus_id);
+        for (auto &c : bus_id) c = std::tolower(c);
+
+        std::ifstream f("/sys/bus/pci/devices/" + bus_id + "/local_cpulist");
+        if (!f.is_open()) return;
+        string cpulist;
+        std::getline(f, cpulist);
+        if (cpulist.empty()) return;
+
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        std::stringstream ss(cpulist);
+        string range;
+        while (std::getline(ss, range, ',')) {
+            auto dash = range.find('-');
+            try {
+                if (dash == string::npos) {
+                    int cpu = std::stoi(range);
+                    if (cpu >= 0 && cpu < CPU_SETSIZE) CPU_SET(cpu, &cpuset);
+                } else {
+                    int lo = std::stoi(range.substr(0, dash));
+                    int hi = std::stoi(range.substr(dash + 1));
+                    for (int cpu = lo; cpu <= hi && cpu < CPU_SETSIZE; cpu++) CPU_SET(cpu, &cpuset);
+                }
+            } catch (...) {
+                continue;
+            }
+        }
+
+        int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+        std::cout << "Server " << id_ << " -- pinned executor thread to local NUMA cpus [" << cpulist << "] rc " << rc << std::endl;
     }
 
 public:
     void start(){
         cudaCheck(cudaSetDevice(id_));
         std::cout << "Server " << id_  << " -- start set device" << std::endl;
+
+        pin_to_local_numa_cpus();
 
         // for (int i = 0; i < num_gpus_; i++) {
         //     if (i == id_) continue;
@@ -104,9 +157,6 @@ public:
         // }
 
         mem_manager_.start_trans_thread(num_gpus_);
-
-        cublasCreate(&cublas_handle_);
-        cudnnCreate(&cudnn_handle_);
 
         active_func_ = non_active_func;
         load_model_flag_ = LoadModelFlag_None;
@@ -210,6 +260,13 @@ public:
             }
 
             if (!executor_sync_queue_->empty()) {
+                // Same ModelRepo singleton race as send_query() (see the
+                // mutex_ comment in model_repo.hpp) -- this block calls
+                // check_model_alloc_status/evict_model/sig_trans_thread,
+                // which read/write model_repo_ on this thread while
+                // transfer_model() threads (this GPU's and others') may be
+                // doing so concurrently.
+                std::lock_guard<std::recursive_mutex> model_repo_lock(server::manager::ModelRepo::getInstance().mutex_);
                 auto sig_func = executor_sync_queue_->front();
                 executor_sync_queue_->pop();
                 auto sig = sig_func.first;
@@ -224,6 +281,7 @@ public:
                     pushers_.create(get_client_addr(stoi(func)));
                     active_func_ = func;
                     load_model_flag_ = LoadModelFlag_LoadModel;
+                    client_load_flag_[stoi(func)] = LoadModelFlag_LoadModel;
                     mem_manager_.set_track_model_memory(func);
                 }
                 else if (sig == ExecutorSignal_Execute) {
@@ -285,20 +343,24 @@ public:
     }
 
     void send_complete_signal() {
-        // reset track flag
-        if (load_model_flag_ == LoadModelFlag_TrackAccess) {
-            load_model_flag_ = LoadModelFlag_None;
-            mem_manager_.unset_track_model_memory(active_func_);
-        }
-        else {
-            auto cur_time = std::chrono::system_clock::now();
-            log_->info("Send complete signal for func {} time {}", active_func_, std::chrono::duration_cast<std::chrono::milliseconds>(cur_time - req_start_).count());
-        }
+        // Model-load completion (TrackAccess -> None) is finalized per-client
+        // in cudaMemcpyAsyncService via client_load_flag_ before this is called,
+        // since active_func_/load_model_flag_ can already have moved on to a
+        // newer client's Startup signal by the time a straggler DtoH from the
+        // client that just finished loading is processed here.
+        auto cur_time = std::chrono::system_clock::now();
+        log_->info("Send complete signal for func {} time {}", active_func_, std::chrono::duration_cast<std::chrono::milliseconds>(cur_time - req_start_).count());
         active_func_ = non_active_func;
         controller_sync_queue->push(id_);
     }
 
     void send_query(const QueryType &type, const string &query_string, int client_id) {
+        // Serialize every RPC against the shared ModelRepo singleton's
+        // background transfer_model() thread(s) on all GPUs (see the mutex_
+        // comment in model_repo.hpp) -- without this, concurrent mutation of
+        // model_repo_'s maps from this thread and transfer_model() is
+        // undefined behavior.
+        std::lock_guard<std::recursive_mutex> model_repo_lock(server::manager::ModelRepo::getInstance().mutex_);
         switch(type) {
             // driver
             case QueryType::cuInit:
@@ -458,11 +520,10 @@ public:
     * cublas
     */
     void cublasCreateService(const string& query_string, int client_id){
-        // cublasHandle_t handle;
-        // auto stat = cublasCreate(&handle);
+        get_cublas_handle(client_id); // force lazy creation of this client's own handle
         handleResponse resp;
         resp.set_error(static_cast<int> (0));
-        resp.set_handle(string(reinterpret_cast<char*>(&cublas_handle_), sizeof(cublas_handle_)));
+        resp.set_handle(std::to_string(client_id));
 
         send_response<handleResponse>(resp, client_id);
         log_->debug("Response: [cublas] cublasCreateService");
@@ -473,24 +534,22 @@ public:
         query.ParseFromString(query_string);
 
         cudaStream_t stream = get_stream(query.stream());
-        auto stat = cublasSetStream(get_cublas_handle(query.handle()), stream);
+        auto stat = cublasSetStream(get_cublas_handle(client_id), stream);
         log_->debug("Async: [cublas] cublasSetStreamService");
     }
 
     void cublasSetMathModeService(const string& query_string, int client_id){
         cublasSetMathModeQuery query;
-        query.ParseFromString(query_string);        
-        
-        // cublasHandle_t handle;
-        // memcpy(&handle, &query.handle()[0], query.handle().length());
+        query.ParseFromString(query_string);
+
         auto mode = static_cast<cublasMath_t>(query.mode());
-        auto stat = cublasSetMathMode(get_cublas_handle(query.handle()), mode);
+        auto stat = cublasSetMathMode(get_cublas_handle(client_id), mode);
         log_->debug("Async: [cublas] cublasSetMathModeService");
     }
 
     void cublasGetMathModeService(const string& query_string, int client_id){
         cublasMath_t mode;
-        auto stat = cublasGetMathMode(get_cublas_handle(query_string), &mode);
+        auto stat = cublasGetMathMode(get_cublas_handle(client_id), &mode);
         cublasGetMathModeResponse resp;
         resp.set_error(static_cast<int> (stat));
         resp.set_mode(static_cast<int> (mode));
@@ -512,12 +571,13 @@ public:
         auto B = reinterpret_cast<float*> (query.matrix_b());
         auto C = reinterpret_cast<float*> (query.matrix_c());
 
-        memoryCheck(mem_manager_.try_insert_model_access(A));
-        A = (float*) mem_manager_.get_cuda_addr(active_func_, (void*) A);
-        B = (float*) mem_manager_.get_cuda_addr(active_func_, (void*) B);
-        C = (float*) mem_manager_.get_cuda_addr(active_func_, (void*) C);
+        string func_id = std::to_string(client_id);
+        memoryCheck(mem_manager_.try_insert_model_access(A, func_id, client_load_flag_[client_id]==LoadModelFlag_TrackAccess));
+        A = (float*) mem_manager_.get_cuda_addr(func_id, (void*) A);
+        B = (float*) mem_manager_.get_cuda_addr(func_id, (void*) B);
+        C = (float*) mem_manager_.get_cuda_addr(func_id, (void*) C);
 
-        auto stat = cublasSgemm(get_cublas_handle(query.handle()), transa, transb, query.m(), query.n(), query.k(), &alpha, A, query.lda(), B, query.ldb(), &beta, C, query.ldc());
+        auto stat = cublasSgemm(get_cublas_handle(client_id), transa, transb, query.m(), query.n(), query.k(), &alpha, A, query.lda(), B, query.ldb(), &beta, C, query.ldc());
         log_->debug("Async: [cublas] cublasSgemmService");
     }
 
@@ -540,11 +600,12 @@ public:
         auto batchCount = query.count();
 
         // memoryCheck(mem_manager_.try_insert_model_access(A));
-        A = (float*) mem_manager_.get_cuda_addr(active_func_, (void*) A);
-        B = (float*) mem_manager_.get_cuda_addr(active_func_, (void*) B);
-        C = (float*) mem_manager_.get_cuda_addr(active_func_, (void*) C);
+        string func_id = std::to_string(client_id);
+        A = (float*) mem_manager_.get_cuda_addr(func_id, (void*) A);
+        B = (float*) mem_manager_.get_cuda_addr(func_id, (void*) B);
+        C = (float*) mem_manager_.get_cuda_addr(func_id, (void*) C);
 
-        auto stat = cublasSgemmStridedBatched(get_cublas_handle(query.handle()), transa, transb, query.m(), query.n(), query.k(), &alpha, A, query.lda(), strideA, B, query.ldb(), strideB, &beta, C, query.ldc(), strideC, batchCount);
+        auto stat = cublasSgemmStridedBatched(get_cublas_handle(client_id), transa, transb, query.m(), query.n(), query.k(), &alpha, A, query.lda(), strideA, B, query.ldb(), strideB, &beta, C, query.ldc(), strideC, batchCount);
         log_->debug("Async: [cublas] cublasSgemmStridedBatchedService");
         
     }
@@ -554,11 +615,10 @@ public:
     * cudnn
     */
     void cudnnCreateService(const string& query_string, int client_id){
-        // cudnnHandle_t handle;
-        // auto stat = cudnnCreate(&handle);
+        get_cudnn_handle(client_id); // force lazy creation of this client's own handle
         handleResponse resp;
         resp.set_error(static_cast<int> (0));
-        resp.set_handle(string(reinterpret_cast<char*>(&cudnn_handle_), sizeof(cudnn_handle_)));
+        resp.set_handle(std::to_string(client_id));
 
         send_response<handleResponse>(resp, client_id);
         log_->debug("Response: [cudnn] cudnnCreateService");
@@ -568,11 +628,9 @@ public:
         setStreamQuery query;
         query.ParseFromString(query_string);
 
-        cudaStream_t stream = get_stream(query.stream());        
-        // cudnnHandle_t handle;
-        // memcpy(&handle, &query.handle()[0], query.handle().length());
+        cudaStream_t stream = get_stream(query.stream());
 
-        cudnnCheck(cudnnSetStream(get_cudnn_handle(query.handle()), stream));
+        cudnnCheck(cudnnSetStream(get_cudnn_handle(client_id), stream));
         log_->debug("Async: [cudnn] cudnnSetStreamService");
     }
 
@@ -694,7 +752,7 @@ public:
         int requestedAlgoCount = query.count();
         int returnedAlgoCount;
         cudnnConvolutionFwdAlgoPerf_t perfResults[requestedAlgoCount];
-        auto stat = cudnnGetConvolutionForwardAlgorithm_v7(get_cudnn_handle(query.handle()), xDesc, wDesc, convDesc, yDesc, requestedAlgoCount, &returnedAlgoCount, perfResults);
+        auto stat = cudnnGetConvolutionForwardAlgorithm_v7(get_cudnn_handle(client_id), xDesc, wDesc, convDesc, yDesc, requestedAlgoCount, &returnedAlgoCount, perfResults);
         
         cudnnGetConvolutionForwardAlgorithm_v7Response resp;
         resp.set_error(static_cast<int> (stat));
@@ -723,14 +781,15 @@ public:
         auto workspace = reinterpret_cast<void*> (query.workspace());
         size_t workspace_size = query.workspace_size();
 
-        memoryCheck(mem_manager_.try_insert_model_access(w));
-        w = mem_manager_.get_cuda_addr(active_func_, w);
-        x = mem_manager_.get_cuda_addr(active_func_, x);
-        y = mem_manager_.get_cuda_addr(active_func_, y);
-        // workspace can be 0 
-        workspace = mem_manager_.get_cuda_addr(active_func_, workspace);
+        string func_id = std::to_string(client_id);
+        memoryCheck(mem_manager_.try_insert_model_access(w, func_id, client_load_flag_[client_id]==LoadModelFlag_TrackAccess));
+        w = mem_manager_.get_cuda_addr(func_id, w);
+        x = mem_manager_.get_cuda_addr(func_id, x);
+        y = mem_manager_.get_cuda_addr(func_id, y);
+        // workspace can be 0
+        workspace = mem_manager_.get_cuda_addr(func_id, workspace);
 
-        cudnnCheck(cudnnConvolutionForward(get_cudnn_handle(query.handle()), &alpha, xDesc, x, wDesc, w, convDesc, algo, workspace, workspace_size, &beta, yDesc, y));
+        cudnnCheck(cudnnConvolutionForward(get_cudnn_handle(client_id), &alpha, xDesc, x, wDesc, w, convDesc, algo, workspace, workspace_size, &beta, yDesc, y));
         log_->debug("Async: [cudnn] cudnnConvolutionForwardService");
     }
 
@@ -754,19 +813,21 @@ public:
         auto estimatedMean = reinterpret_cast<void*> (query.es_mean());
         auto estimatedVariance = reinterpret_cast<void*> (query.es_var());
 
-        memoryCheck(mem_manager_.try_insert_model_access(bnScale));
-        memoryCheck(mem_manager_.try_insert_model_access(bnBias));
-        memoryCheck(mem_manager_.try_insert_model_access(estimatedMean));
-        memoryCheck(mem_manager_.try_insert_model_access(estimatedVariance));
+        string func_id = std::to_string(client_id);
+        bool is_tracking = client_load_flag_[client_id]==LoadModelFlag_TrackAccess;
+        memoryCheck(mem_manager_.try_insert_model_access(bnScale, func_id, is_tracking));
+        memoryCheck(mem_manager_.try_insert_model_access(bnBias, func_id, is_tracking));
+        memoryCheck(mem_manager_.try_insert_model_access(estimatedMean, func_id, is_tracking));
+        memoryCheck(mem_manager_.try_insert_model_access(estimatedVariance, func_id, is_tracking));
 
-        bnScale = mem_manager_.get_cuda_addr(active_func_, bnScale);
-        bnBias = mem_manager_.get_cuda_addr(active_func_, bnBias);
-        estimatedMean = mem_manager_.get_cuda_addr(active_func_, estimatedMean);
-        estimatedVariance = mem_manager_.get_cuda_addr(active_func_, estimatedVariance);
-        x = mem_manager_.get_cuda_addr(active_func_, x);
-        y = mem_manager_.get_cuda_addr(active_func_, y);
+        bnScale = mem_manager_.get_cuda_addr(func_id, bnScale);
+        bnBias = mem_manager_.get_cuda_addr(func_id, bnBias);
+        estimatedMean = mem_manager_.get_cuda_addr(func_id, estimatedMean);
+        estimatedVariance = mem_manager_.get_cuda_addr(func_id, estimatedVariance);
+        x = mem_manager_.get_cuda_addr(func_id, x);
+        y = mem_manager_.get_cuda_addr(func_id, y);
 
-        cudnnCheck(cudnnBatchNormalizationForwardInference(get_cudnn_handle(query.handle()), mode, &alpha, &beta, xDesc, x, yDesc, y, bnScaleBiasMeanVarDesc, bnScale, bnBias, estimatedMean, estimatedVariance, epsilon));
+        cudnnCheck(cudnnBatchNormalizationForwardInference(get_cudnn_handle(client_id), mode, &alpha, &beta, xDesc, x, yDesc, y, bnScaleBiasMeanVarDesc, bnScale, bnBias, estimatedMean, estimatedVariance, epsilon));
         log_->debug("Async: [cudnn] cudnnBatchNormalizationForwardInferenceService");
     }
 
@@ -958,8 +1019,10 @@ public:
 
         // walkaround: signal to specify following memory requests not belonging to models
         load_model_flag_ = LoadModelFlag_TrackAccess;
-        mem_manager_.init_model_readiness(active_func_);
-    }   
+        client_load_flag_[client_id] = LoadModelFlag_TrackAccess;
+        string func_id = std::to_string(client_id);
+        mem_manager_.init_model_readiness(func_id);
+    }
 
     // memory management
     void cudaMallocService(const string& query_string, int client_id){
@@ -967,7 +1030,13 @@ public:
         query.ParseFromString(query_string);
 
         auto size = query.size();
-        auto ptr = mem_manager_.cudaMallocBackend(size, load_model_flag_==LoadModelFlag_LoadModel, active_func_);
+        string func_id = std::to_string(client_id);
+        auto ptr = mem_manager_.cudaMallocBackend(size, client_load_flag_[client_id]==LoadModelFlag_LoadModel, func_id);
+
+        std::cout << "MALLOC_DIAG server=" << id_ << " func=" << func_id << " ptr=" << ptr
+                  << " size=" << size
+                  << " ts=" << std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()
+                  << std::endl;
 
         cudaMallocResponse resp;
         resp.set_ptr(reinterpret_cast<uint64_t>(ptr));
@@ -982,7 +1051,26 @@ public:
         query.ParseFromString(query_string);
 
         auto ptr = reinterpret_cast<void*>(query.ptr());
-        mem_manager_.cudaFreeBackend(ptr, active_func_);
+        string func_id = std::to_string(client_id);
+
+        // Diagnostic only (no synchronization forced -- cudaStreamQuery is
+        // a non-blocking poll, so this shouldn't perturb timing the way a
+        // real sync did). Checks whether GPU work is still enqueued on
+        // either of this executor's two shared streams at the exact moment
+        // this block's memory becomes eligible for a *different* function's
+        // next cudaMallocBackend() to reuse it -- if frequently "BUSY"
+        // here, that's direct evidence of a cross-stream reuse race
+        // (default_stream_ vs secondary_stream_ have no ordering guarantee
+        // relative to each other).
+        cudaError_t d_busy = cudaStreamQuery(default_stream_);
+        cudaError_t s_busy = cudaStreamQuery(secondary_stream_);
+        std::cout << "FREE_DIAG server=" << id_ << " func=" << func_id << " ptr=" << ptr
+                  << " default_stream=" << (d_busy == cudaErrorNotReady ? "BUSY" : "idle")
+                  << " secondary_stream=" << (s_busy == cudaErrorNotReady ? "BUSY" : "idle")
+                  << " ts=" << std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()
+                  << std::endl;
+
+        mem_manager_.cudaFreeBackend(ptr, func_id);
 
         genericResponse resp;
         resp.set_error(0);
@@ -998,22 +1086,23 @@ public:
         auto kind = static_cast<cudaMemcpyKind>(query.kind());
 
         cudaMemcpyResponse resp;
+        string func_id = std::to_string(client_id);
         if (kind == cudaMemcpyKind::cudaMemcpyHostToDevice) {
             auto dst = reinterpret_cast<void*>(query.dst());
-            mem_manager_.cudaMemcpyBackendHtoD(dst, query.payload(), active_func_);
+            mem_manager_.cudaMemcpyBackendHtoD(dst, query.payload(), func_id);
         }
         else if (kind == cudaMemcpyKind::cudaMemcpyDeviceToHost) {
             auto src = reinterpret_cast<void*>(query.src());
             void* local_dst = malloc(query.count());
-            mem_manager_.cudaMemcpyBackendDtoH(local_dst, src, query.count(), active_func_);
+            mem_manager_.cudaMemcpyBackendDtoH(local_dst, src, query.count(), func_id);
             resp.set_payload(string(static_cast<char*>(local_dst), query.count()));
             free(local_dst);
-        } 
+        }
         else if (kind == cudaMemcpyKind::cudaMemcpyDeviceToDevice) {
             auto src = reinterpret_cast<void*>(query.src());
             auto dst = reinterpret_cast<void*>(query.dst());
-            mem_manager_.cudaMemcpyBackendDtoD(dst, src, query.count(), active_func_);
-        } 
+            mem_manager_.cudaMemcpyBackendDtoD(dst, src, query.count(), func_id);
+        }
         else {
             log_->warn("Unsupported cudaMemcpyKind {}", kind);
             std::cout << "Unsupported cudaMemcpyKind " << kind << std::endl;
@@ -1031,23 +1120,31 @@ public:
         auto kind = static_cast<cudaMemcpyKind>(query.kind());
         cudaStream_t stream = get_stream(query.stream());
 
+        string func_id = std::to_string(client_id);
         if (kind == cudaMemcpyKind::cudaMemcpyHostToDevice) {
             auto dst = reinterpret_cast<void*>(query.dst());
-            mem_manager_.cudaMemcpyAsyncBackendHtoD(dst, query.payload(), stream, load_model_flag_==LoadModelFlag_LoadModel, active_func_);
+            mem_manager_.cudaMemcpyAsyncBackendHtoD(dst, query.payload(), stream, client_load_flag_[client_id]==LoadModelFlag_LoadModel, func_id);
         }
         else if (kind == cudaMemcpyKind::cudaMemcpyDeviceToHost) {
             auto src = reinterpret_cast<void*>(query.src());
             void* local_dst = malloc(query.count());
-            mem_manager_.cudaMemcpyAsyncBackendDtoH(local_dst, src, query.count(), stream, active_func_);
-            stream_async_msg_.push_back({active_func_, local_dst, query.count(), reinterpret_cast<void*>(query.dst())});
-            
+            mem_manager_.cudaMemcpyAsyncBackendDtoH(local_dst, src, query.count(), stream, func_id);
+            stream_async_msg_.push_back({func_id, local_dst, query.count(), reinterpret_cast<void*>(query.dst())});
+
+            // finalize this client's own model-load tracking (if it was in the
+            // TrackAccess walkaround phase) using its own id, independent of
+            // whatever active_func_/load_model_flag_ currently ambiently hold.
+            if (client_load_flag_[client_id] == LoadModelFlag_TrackAccess) {
+                client_load_flag_.erase(client_id);
+                mem_manager_.unset_track_model_memory(func_id);
+            }
             send_complete_signal();
-        } 
+        }
         else if (kind == cudaMemcpyKind::cudaMemcpyDeviceToDevice) {
             auto src = reinterpret_cast<void*>(query.src());
             auto dst = reinterpret_cast<void*>(query.dst());
-            mem_manager_.cudaMemcpyAsyncBackendDtoD(dst, src, query.count(), stream, active_func_);
-        } 
+            mem_manager_.cudaMemcpyAsyncBackendDtoD(dst, src, query.count(), stream, func_id, client_load_flag_[client_id]==LoadModelFlag_TrackAccess);
+        }
         else {
             std::cout << "Unsupported kind " << kind << std::endl;
         }
@@ -1062,7 +1159,8 @@ public:
         auto ptr = reinterpret_cast<void*>(query.ptr());
         cudaStream_t stream = get_stream(query.stream());
 
-        mem_manager_.cudaMemsetAsyncBackend(ptr, query.value(), query.count(), stream, active_func_);
+        string func_id = std::to_string(client_id);
+        mem_manager_.cudaMemsetAsyncBackend(ptr, query.value(), query.count(), stream, func_id);
         
         log_->debug("Async: cudaMemsetAsyncService");
     }
@@ -1241,30 +1339,31 @@ public:
             }
 
             // first execution
-            if (load_model_flag_ == LoadModelFlag_TrackAccess) {
-                if (kernel_model_access_loc().find(active_func_) == kernel_model_access_loc().end()) {
-                    kernel_model_access_loc()[active_func_] = {};
+            string func_id = std::to_string(client_id);
+            if (client_load_flag_[client_id] == LoadModelFlag_TrackAccess) {
+                if (kernel_model_access_loc_.find(func_id) == kernel_model_access_loc_.end()) {
+                    kernel_model_access_loc_[func_id] = {};
                 }
-                if (kernel_model_access_loc()[active_func_].find(ptr) == kernel_model_access_loc()[active_func_].end()) {
-                    kernel_model_access_loc()[active_func_][ptr] = {};
+                if (kernel_model_access_loc_[func_id].find(ptr) == kernel_model_access_loc_[func_id].end()) {
+                    kernel_model_access_loc_[func_id][ptr] = {};
                 }
                 for (int i = 0; i < query.args_size(); i++) {
                     if (query.args(i).length() % sizeof(uint64_t) == 0) {
                         for (int j = 0; j <  query.args(i).length() / sizeof(uint64_t); j++) {
-                            if (mem_manager_.is_model_address(active_func_, (void*) ((uint64_t*) args[i])[j])) {
-                                memoryCheck(mem_manager_.try_insert_model_access((void*) ((uint64_t*) args[i])[j]));
-                                kernel_model_access_loc()[active_func_][ptr].insert({i, j});
+                            if (mem_manager_.is_model_address(func_id, (void*) ((uint64_t*) args[i])[j])) {
+                                memoryCheck(mem_manager_.try_insert_model_access((void*) ((uint64_t*) args[i])[j], func_id, true));
+                                kernel_model_access_loc_[func_id][ptr].insert({i, j});
                             }
-                            else if (mem_manager_.valid_memory_address(active_func_, (void*) ((uint64_t*) args[i])[j])) {
-                                kernel_model_access_loc()[active_func_][ptr].insert({i, j});
+                            else if (mem_manager_.valid_memory_address(func_id, (void*) ((uint64_t*) args[i])[j])) {
+                                kernel_model_access_loc_[func_id][ptr].insert({i, j});
                             }
                         }
                     }
                 }
             }
             else {
-                for (auto &info : kernel_model_access_loc()[active_func_][ptr]) {
-                    ((uint64_t*) args[info.first])[info.second] = (uint64_t) mem_manager_.get_cuda_addr(active_func_, (void*) ((uint64_t*) args[info.first])[info.second]);
+                for (auto &info : kernel_model_access_loc_[func_id][ptr]) {
+                    ((uint64_t*) args[info.first])[info.second] = (uint64_t) mem_manager_.get_cuda_addr(func_id, (void*) ((uint64_t*) args[info.first])[info.second]);
                 }
             }
 
@@ -1338,24 +1437,59 @@ private:
         }
     }
 
-    inline cudnnHandle_t get_cudnn_handle(const string& handle_msg) {
-        return cudnn_handle_;
-    }
-    
-    inline cublasHandle_t get_cublas_handle(const string& handle_msg) {
-        return cublas_handle_;
+    // cublas_handle_/cudnn_handle_ used to be single executor-wide handles
+    // shared by every client on this GPU regardless of handle_msg -- since
+    // handles carry mutable state (current stream via cublasSetStream /
+    // cudnnSetStream, math mode, etc.), concurrent clients interleaving
+    // SetStream+op RPC pairs could clobber each other's handle state and
+    // run a GEMM/convolution on the wrong stream or with the wrong mode,
+    // producing fast-but-wrong (nan/garbage) output without any crash --
+    // independent of and much more frequent than any memory eviction race.
+    // Giving each client its own lazily-created handle, keyed the same way
+    // as the other per-client isolation fixes in this file, removes the
+    // shared mutable state entirely.
+    inline cudnnHandle_t get_cudnn_handle(int client_id) {
+        auto it = client_cudnn_handle_.find(client_id);
+        if (it == client_cudnn_handle_.end()) {
+            cudnnHandle_t handle;
+            cudnnCreate(&handle);
+            client_cudnn_handle_[client_id] = handle;
+            return handle;
+        }
+        return it->second;
     }
 
+    inline cublasHandle_t get_cublas_handle(int client_id) {
+        auto it = client_cublas_handle_.find(client_id);
+        if (it == client_cublas_handle_.end()) {
+            cublasHandle_t handle;
+            cublasCreate(&handle);
+            client_cublas_handle_[client_id] = handle;
+            return handle;
+        }
+        return it->second;
+    }
+
+    // create_stream()/get_stream() used to route operations to one of two
+    // real streams (default_stream_/secondary_stream_) with no ordering
+    // guarantee between them, and no cudaStreamWaitEvent RPC exists
+    // anywhere in this protocol (confirmed: grep across the whole repo
+    // finds zero references) to let a client establish one. Any client
+    // code path that creates a second stream and relies on the CUDA
+    // caching allocator's normal stream-aware safety (or any other
+    // cross-stream ordering) would have that ordering silently dropped
+    // server-side, producing fast-but-wrong reads with no crash. Collapsing
+    // both to the single real default_stream_ makes every operation from
+    // every client strictly FIFO-ordered as submitted, removing any
+    // possibility of a cross-stream race at the cost of the (apparently
+    // unused, since TODO stream pool was never implemented) concurrency a
+    // second stream would have offered.
     inline cudaStream_t create_stream(unsigned flags, int priority) {
-        // TODO stream pool
-        return secondary_stream_;
+        return default_stream_;
     }
 
     inline cudaStream_t get_stream(const string& stream_msg) {
-        cudaStream_t input_stream;
-        memcpy(&input_stream, &stream_msg[0], stream_msg.length());
-        // return input_stream == 0 ? default_stream_ : input_stream;
-        return input_stream == 0 ? default_stream_ : secondary_stream_;
+        return default_stream_;
     }
 
     // inline vector<pair<int, int>> get_model_access_in_kernel_launch(string& function, void** args, vector)
@@ -1374,13 +1508,32 @@ private:
     manager::MemoryManager mem_manager_;
 
     int load_model_flag_;
+    // per-client load-phase tracking (keyed by client_id, which is always
+    // that client's own function id -- see get_client_addr/ipc naming).
+    // active_func_/load_model_flag_ above are shared executor-level state
+    // driven by controller signals; a request from an older client can
+    // still be queued when a newer Startup signal has already advanced
+    // them, so per-request data routing must not rely on the ambient
+    // values. Default-constructed int is 0 == LoadModelFlag_None.
+    map<int, int> client_load_flag_;
     std::chrono::time_point<std::chrono::system_clock> req_start_;
 
-    // map<const void*, ordered_set<pair<int, int>>> kernel_model_access_loc_;
+    // kernel_model_access_loc() in kernel_lookup.cpp is a function-local
+    // static -- a single map instance shared by all 4 GPU executor threads.
+    // cudaLaunchKernelService both reads and mutates it (find/[]/insert) on
+    // every kernel launch with no locking; std::map is not safe for
+    // concurrent mutation, and the resulting tree corruption silently
+    // returns wrong/empty lookups, causing kernel args to keep stale/
+    // untranslated virtual pointers -- fast execution against wrong memory,
+    // i.e. exactly the NaN/garbage-output corruption under load. Keeping
+    // this per-executor instead of using the shared global eliminates the
+    // cross-thread race entirely (each GPU's kernel pointers/arg layouts
+    // are independent info anyway, so there's no reason to share it).
+    map<string, KernelAccessLoc> kernel_model_access_loc_;
 
     // cache cudnn cublas handles
-    cudnnHandle_t cudnn_handle_;
-    cublasHandle_t cublas_handle_;
+    map<int, cudnnHandle_t> client_cudnn_handle_;
+    map<int, cublasHandle_t> client_cublas_handle_;
 
     // collections of local descriptors
     map<string, cudnnTensorDescriptor_t> tensor_desc_map_;

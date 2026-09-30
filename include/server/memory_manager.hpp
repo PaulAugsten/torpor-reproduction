@@ -101,6 +101,11 @@ public:
             }
             else {
                 if (model_repo_.device_model_info_map_[server_id_][active_func].block_virtual_to_cuda_[ptr].in_cuda_) {
+                    // NOTE: a device-wide cudaDeviceSynchronize() was tried
+                    // here and measured to make output corruption *worse*
+                    // (13.6% -> 79.7% at FUNC_NUM=10), not better -- see
+                    // diagnostic logging added in cuda_server.hpp's
+                    // cudaFreeService instead of a blind fix here.
                     block_manager_->evict_block(model_repo_.device_model_info_map_[server_id_][active_func].block_virtual_to_cuda_[ptr].cuda_addr_, model_repo_.model_host_info_map_[active_func].virtual_blocks_[ptr].size_);
                 }
 
@@ -145,9 +150,9 @@ public:
         cudaCheck(cudaMemcpyAsync(local_dst, get_phy_address(src, active_func), count, cudaMemcpyKind::cudaMemcpyDeviceToHost, stream));
     }
 
-    void cudaMemcpyAsyncBackendDtoD(void* dst, void* src, size_t count, cudaStream_t stream, string& active_func){
+    void cudaMemcpyAsyncBackendDtoD(void* dst, void* src, size_t count, cudaStream_t stream, string& active_func, bool is_tracking){
         if (is_model_address(active_func, src)) {
-            memoryCheck(try_insert_model_access(src));
+            memoryCheck(try_insert_model_access(src, active_func, is_tracking));
             src = check_param_readiness(src, active_func);
         }
         else {
@@ -244,6 +249,17 @@ public:
         }
         auto evict_start = std::chrono::system_clock::now();
 
+        // Block release below immediately makes this model's GPU memory
+        // available for reuse by a different model. CUDA work (kernels on
+        // default_stream_/secondary_stream_, transfers on trans_stream_) is
+        // asynchronous, so without waiting for it to actually finish here,
+        // a still-in-flight read of this model's weights can race against
+        // another function's write into the same freed physical memory --
+        // producing fast-but-wrong (NaN/garbage) results instead of a crash.
+        // This executor thread owns exactly one GPU (cudaSetDevice at
+        // startup, never changed), so a device-wide sync is unambiguous.
+        cudaCheck(cudaDeviceSynchronize());
+
         for (auto &info : model_repo_.model_host_info_map_[function].virtual_blocks_) {
             if (model_repo_.device_model_info_map_[server_id_][function].block_virtual_to_cuda_[info.first].in_cuda_) {
                 model_repo_.device_model_info_map_[server_id_][function].block_virtual_to_cuda_[info.first].in_cuda_ = false;
@@ -270,13 +286,23 @@ public:
         return ptr;
     }
 
-    inline bool try_insert_model_access(void* dev_ptr) {
-        if (track_memory_flag_.first){
-            if (model_repo_.model_host_info_map_[track_memory_flag_.second].model_param_info_.find(dev_ptr) != model_repo_.model_host_info_map_[track_memory_flag_.second].model_param_info_.end()) {
-                model_repo_.check_add_model_access_order(track_memory_flag_.second, dev_ptr);
+    // track_memory_flag_ is ambient, executor-wide state (like the
+    // active_func_/load_model_flag_ race fixed elsewhere): a stale call
+    // from a function whose own TrackAccess window already ended, arriving
+    // after track_memory_flag_ has moved on to a *different* function's
+    // discovery phase, would silently register its pointer into the wrong
+    // function's model_access_order_map_ -- corrupting that function's
+    // future swap-in list with a bogus pointer, while the true owner's own
+    // registration for that pointer is dropped, leaving it uninitialized in
+    // GPU memory after any later swap-in. Callers now pass their own
+    // request's true function id and per-client tracking state explicitly.
+    inline bool try_insert_model_access(void* dev_ptr, string& function, bool is_tracking) {
+        if (is_tracking){
+            if (model_repo_.model_host_info_map_[function].model_param_info_.find(dev_ptr) != model_repo_.model_host_info_map_[function].model_param_info_.end()) {
+                model_repo_.check_add_model_access_order(function, dev_ptr);
             }
             else {
-                std::cout << "Server " << server_id_  << " -- Model " << track_memory_flag_.second << " parameter ptr not found " << (uint64_t) dev_ptr << std::endl;
+                std::cout << "Server " << server_id_  << " -- Model " << function << " parameter ptr not found " << (uint64_t) dev_ptr << std::endl;
                 return false;
             }
         }
@@ -345,6 +371,11 @@ private:
             auto signal = sig_queue_->dequeue();
             if (signal.first >= PipeSignal_Transfer) {
                 // start transmission
+                // See the mutex_ comment in model_repo.hpp: this thread
+                // mutates the same process-wide ModelRepo singleton the
+                // main RPC-dispatch thread (and other GPUs' transfer
+                // threads) touch, with no other synchronization.
+                std::lock_guard<std::recursive_mutex> model_repo_lock(model_repo_.mutex_);
 
                 int src_gpu_id = signal.first - PipeSignal_Transfer - 1;
                 std::cout << "Server " << server_id_ << " -- Start transfering model " << signal.second << " from GPU " << src_gpu_id << std::endl;

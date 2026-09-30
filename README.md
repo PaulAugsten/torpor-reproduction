@@ -1,5 +1,16 @@
 # Torpor Artifact
 
+> **Diagnostic branch, not used for any reported result.** This branch holds
+> experimental changes to the server made while investigating crashes and
+> wrong outputs: a process-wide mutex around the `ModelRepo` singleton,
+> model-load tracking per client instead of per server, per-client cuBLAS and
+> cuDNN handles, executor threads pinned to their GPU's local CPU cores, a
+> device synchronisation before a freed block is reused, and extra diagnostic
+> logging (`include/server/cuda_server.hpp`, `memory_manager.hpp`,
+> `model_repo.hpp`). None of these changes was validated. The code comments
+> record the reasoning at the time. The reproduction and all results are on
+> the `main` branch (`reproduction/README.md`).
+
 ### Introduction
 
 Torpor is a serverless inference system that support GPU-efficient model serving through *late-binding and model swapping*. It keeps models in main memory and swaps them onto a shared pool of local GPUs when requests arrive. Torpor has been successfully integrated into Alibaba's serverless platform (refer to our paper for more details).
