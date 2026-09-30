@@ -2,3 +2,16 @@
 */.DS_Store
 .DS_Store
 *__pycache__*
+
+# Reproduction (reproduction/): run outputs and large files. The raw logs of
+# the reported runs are in the Zenodo data record.
+*.sif
+overlay.img
+core.*
+server-activefunc
+server-trackfix
+tools/req_arrivals_*.npy
+reproduction/**/logs_*/
+reproduction/**/results*.txt
+reproduction/**/*.log
+reproduction/**/log_*.txt

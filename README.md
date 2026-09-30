@@ -1,5 +1,12 @@
 # Torpor Artifact
 
+> **About this fork.** This fork adds a reproduction of the single-node
+> evaluation (Table 4, Figures 6 to 11) on an HPC cluster with Apptainer and
+> Slurm (JURECA, 4x NVIDIA A100). See
+> [`reproduction/README.md`](reproduction/README.md) for results, instructions
+> and all deviations. Apart from `reproduction/`, the only change to the
+> upstream artifact is a one-line fix in `include/server/model_repo.hpp`.
+
 ### Introduction
 
 Torpor is a serverless inference system that support GPU-efficient model serving through *late-binding and model swapping*. It keeps models in main memory and swaps them onto a shared pool of local GPUs when requests arrive. Torpor has been successfully integrated into Alibaba's serverless platform (refer to our paper for more details).
