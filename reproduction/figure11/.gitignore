@@ -1,0 +1,5 @@
+# built by build_server.sh, recreate with: bash build_server.sh
+server_bin_fixed/
+# Slurm job output (logs and results are in $FIG11_HOME/runs)
+torpor-fig11-*.out
+torpor-fig11-*.err
