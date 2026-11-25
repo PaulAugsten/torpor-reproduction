@@ -1,6 +1,6 @@
 #!/bin/bash
 # Figure 7, all four variants: Baseline, +Group, +Pipeline, +Pinned.
-# The order does not matter; every model gets a fresh server.
+# The order does not matter as every model gets a fresh server.
 # Usage: ./run_all_figure7.sh   (compute node, venv active)
 # Set KEEP_LOGS=1 to keep the logs and results of the previous run.
 set -u

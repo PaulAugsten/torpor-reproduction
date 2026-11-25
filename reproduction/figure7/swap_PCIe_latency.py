@@ -73,7 +73,7 @@ def execute_func(func, server = -1):
 
     print(f'Execute {func} on {server_id}: {x.text}')
     print(f'[{func}] end2end {end_t - start_t}, signal {mid_t - start_t}, start_t {start_t}')
-
+   
     start_i = x.text.find('elasped:')
     elasped_str = x.text[start_i + 9:start_i+17]
     elasped[server_id] = elasped[server_id] + [float(elasped_str)] if server_id in elasped else [float(elasped_str)]
@@ -92,7 +92,6 @@ ack = send_signal(req)
 # execute_func(0, src_gpu)
 for i in range(10):
     execute_func(0, 0)
-
     req = SignalRequest()
     req.type = Unload
     req.function = str(0)
@@ -104,4 +103,3 @@ print(f'Latency avg {np.average(elasped_list)}, std {np.std(elasped_list)}')
 # print(elasped)
 elasped_list = end2end_elasped[0][1:]
 print(f'End2End avg {np.average(elasped_list)}, std {np.std(elasped_list)}')
-

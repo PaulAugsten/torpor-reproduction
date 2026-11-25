@@ -1,6 +1,6 @@
 #!/bin/bash
 # Figure 7, +Pinned: BUFFER_SIZE=1610612736 (1.5 GB, i.e. no pipelining),
-# per the upstream Figure 7 README.
+# per the original Figure 7 README.
 # Usage: ./run_fig7_pinned.sh   (compute node, venv active)
 cd "$(dirname "$0")"
 source ../common/env.sh

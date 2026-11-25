@@ -2,18 +2,18 @@
 
 Four cumulative variants per model (resnet152, bertqa), all driven by
 `swap_PCIe_latency.py` (every request forces a host-to-GPU swap). This is
-upstream's `evaluation/figure7/test_scripts/swap_PCIe_latency.py` with the
+the original's `evaluation/figure7/test_scripts/swap_PCIe_latency.py` with the
 client launched through Apptainer.
 
 | Variant   | Server image                      | Extra server env         |
-|-----------|-----------------------------------|--------------------------|
+| --------- | --------------------------------- | ------------------------ |
 | Baseline  | `torpor-server-fig7-baseline.sif` | `BUFFER_SIZE=1610612736` |
 | +Pinned   | `torpor-server.sif`               | `BUFFER_SIZE=1610612736` |
 | +Pipeline | `torpor-server.sif`               | `BUFFER_SIZE=1`          |
 | +Group    | `torpor-server.sif`               | none (default)           |
 
 The Baseline image has the pinned staging path in `memory_manager.hpp`
-commented out, as the upstream Figure 7 README instructs. The exact patch is
+commented out, as the original Figure 7 README instructs. The exact patch is
 `../images/patches/fig7-baseline-memory_manager.patch`. General porting notes
 are in [`../README.md`](../README.md).
 

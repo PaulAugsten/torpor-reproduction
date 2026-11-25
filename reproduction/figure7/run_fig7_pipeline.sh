@@ -1,6 +1,6 @@
 #!/bin/bash
 # Figure 7, +Pipeline: BUFFER_SIZE=1, i.e. per-parameter pipelining without
-# grouping, per the upstream Figure 7 README.
+# grouping, per the original Figure 7 README.
 # Usage: ./run_fig7_pipeline.sh   (compute node, venv active)
 cd "$(dirname "$0")"
 source ../common/env.sh

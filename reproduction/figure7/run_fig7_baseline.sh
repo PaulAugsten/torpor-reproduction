@@ -1,6 +1,6 @@
 #!/bin/bash
 # Figure 7, Baseline: server built with the pinned staging path in
-# memory_manager.hpp commented out (upstream Figure 7 README; prebuilt as
+# memory_manager.hpp commented out (original Figure 7 README; prebuilt as
 # torpor-server-fig7-baseline.sif, see ../images/).
 # Usage: ./run_fig7_baseline.sh   (compute node, venv active)
 cd "$(dirname "$0")"
