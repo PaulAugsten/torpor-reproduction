@@ -1,17 +1,19 @@
-import time
-import sys
-import os
-import zmq
-from signal_pb2 import *
-import subprocess
-import requests
-from concurrent.futures import ThreadPoolExecutor
 import argparse
-import queue
+import logging
 import multiprocessing
+import os
+import queue
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import Process
 from multiprocessing import Queue as pqueue
-import logging
+
+import requests
+import zmq
+from signal_pb2 import *
+
 logging.basicConfig(format='%(asctime)s.%(msecs)03d: %(message)s', datefmt='%Y-%m-%d,%H:%M:%S', filename='router.log', filemode='w', level=logging.INFO)
 
 # GPU id -> NUMA-local cores of a JURECA DC-GPU node; clients are pinned there.
@@ -22,15 +24,13 @@ CLIENT_SIF = os.environ.get('CLIENT_SIF',
     f'{TORPOR}/images/torpor-client.sif')
 os.makedirs('logs_fig8', exist_ok=True)
 
-# Client endpoints listen on CLIENT_PORT_BASE + client_id. Upstream uses 9000,
-# which puts client 100 on port 9100, taken by node_exporter on JURECA nodes.
+# Original uses port 9000 + id; 9100 is taken by node_exporter on JURECA.
 CLIENT_PORT_BASE = int(os.environ.get('CLIENT_PORT_BASE', 20000))
 
 bert_ddl = 0.2
 bert_function = set()
 bert_batch_size = 1
-# Seconds a function is skipped after a request timeout. Upstream skips it for
-# the rest of the run.
+# Seconds a function is skipped after a timeout.
 UNHEALTHY_COOLDOWN = 10
 
 class SocketCache():
@@ -112,7 +112,6 @@ def container_manager(server_id):
                             f'{CLIENT_SIF} bash /start_with_server_id.sh {client_id} {server_id} /endpoint.py {client_id + CLIENT_PORT_BASE} '
                             f'> logs_fig8/client_{client_id}.log 2>&1 &'
                         )
-                    
                     else:
                         core = NUMA_CORES[server_id][(client_id // server_num) % 16]
                         os.system(
@@ -206,7 +205,7 @@ class Router():
         self.schedule_queue = queue.Queue()
         self.pool = ThreadPoolExecutor(max_workers=2)
 
-        self.timeout_func = {}  # func_id -> timestamp it was last marked unhealthy
+        self.timeout_func = {}  # func_id -> time of its last timeout
         self.sockets = SocketCache(self.context)
         for i in range(server_num):
             reader_p = Process(target=container_manager, args=(i,))

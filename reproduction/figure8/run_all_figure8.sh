@@ -1,7 +1,7 @@
 #!/bin/bash
 # Figure 8, all points on a single GPU.
 #   Native: 19 functions at 80/60/40/20/10 rpm each (20 rpm is an addition to
-#           upstream's list).
+#           the list of the original).
 #   Torpor: (func_num, rpm) = (33,80) (40,60) (60,40) (120,20) (210,10).
 # Usage: ./run_all_figure8.sh   (compute node, venv active)
 # Set KEEP_LOGS=1 to keep the logs of the previous run. Export SERVER_SIF to

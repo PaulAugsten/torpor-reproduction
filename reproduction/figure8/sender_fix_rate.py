@@ -12,8 +12,7 @@ data_path = '../../tools'
 class Sender:
     def __init__(self, func_num, mins, fixed_rpm):
         self.func_num = func_num
-        # The cache key includes the rate. Upstream keys only on func_num and mins,
-        # so runs with the same func_num but a different rate replay a stale trace.
+        # Cache key includes the rate (original: func_num and mins only).
         trace_file = f'{data_path}/req_arrivals_{func_num}_{mins}min_{fixed_rpm}rpm.npy'
         if os.path.isfile(trace_file):
             self.req_arrivals = np.load(trace_file)
@@ -44,7 +43,7 @@ class Sender:
                 cur_stmp += i / 1000
                 req_arrivals.append((i / 1000, f))
 
-
+    
     def run(self, flag=0):
         if flag == -1:
             # load
@@ -61,7 +60,7 @@ class Sender:
                 # print(f'Send func {func} after sleep {i}')
                 time.sleep(i)
                 self.send(func)
-
+                    
 def test(concurrency):
     for i in range(concurrency):
         sender_socket.send_string(str(i))
@@ -72,7 +71,7 @@ if __name__ == '__main__':
     func_num = 1
     if (len(sys.argv) > 1):
         func_num = int(sys.argv[1])
-
+    
     mins = 5
     if (len(sys.argv) > 2):
         mins = int(sys.argv[2])
@@ -84,6 +83,6 @@ if __name__ == '__main__':
     fixed_rpm = 80
     if (len(sys.argv) > 4):
         fixed_rpm = int(sys.argv[4])
-
+    
     sender = Sender(func_num, mins, fixed_rpm)
     sender.run(flag)

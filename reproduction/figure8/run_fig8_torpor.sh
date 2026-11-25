@@ -1,7 +1,7 @@
 #!/bin/bash
 # Figure 8, one Torpor point on a single GPU.
 # Usage: ./run_fig8_torpor.sh <FUNC_NUM> <RATE>
-# Upstream pairs: (33,80) (40,60) (60,40) (120,20) (210,10)
+# Pairs from the paper: (33,80) (40,60) (60,40) (120,20) (210,10)
 set -u -o pipefail
 cd "$(dirname "$0")"
 source ../common/env.sh
@@ -30,9 +30,6 @@ trap cleanup EXIT
 kill_stale_processes
 rm -rf /dev/shm/ipc && mkdir -p /dev/shm/ipc
 
-# Remove the previous run's logs first. router.py truncates router.log only
-# once it has started, and the readiness loop below reads it immediately, so a
-# stale log would let the sender start before the models are loaded.
 rm -f router.log server.log
 rm -f "logs_fig8/torpor_${FUNC_NUM}f_${RATE}rpm_result.txt"
 rm -f log_client_*.txt log_executor_*.txt log_cuda_server*.txt router_stdout.log
@@ -46,8 +43,6 @@ apptainer exec --nv \
     > server.log 2>&1 &
 SERVER_PID=$!
 
-# The server can crash mid-run, and nothing downstream notices: the clients
-# just time out, and a partial router.log still parses. Check at every step.
 server_alive() { kill -0 "$SERVER_PID" 2>/dev/null; }
 server_died() {
     echo "ERROR: server process died $1 -- see server.log,"
@@ -55,7 +50,6 @@ server_died() {
     exit 1
 }
 
-# One executor (single GPU). See ../common/model_loop.sh for the prefix match.
 echo "Waiting for server readiness..."
 READY_SRV=0
 for i in $(seq 1 120); do
@@ -72,7 +66,6 @@ echo "Server is ready."
 sleep 5
 
 # 2. Router with -s 1; it launches the clients.
-# Pinned to a core outside all NUMA_CORES ranges so the clients cannot starve it.
 taskset -c 200 python3 router.py -m resnet152 -s 1 -f "$FUNC_NUM" -p sa > router_stdout.log 2>&1 &
 ROUTER_PID=$!
 
