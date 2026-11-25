@@ -1,7 +1,6 @@
 #!/bin/bash
 # Figure 6, "w/o batch" bar. The driver runs inside torpor-client-nobatch.sif,
-# which is built with queryBufferSize=1 in async_sender.hpp (upstream edits
-# that file inside the container; SIF images are read-only, see ../images/).
+# which is built with queryBufferSize=1 in async_sender.hpp.
 # Usage: ./run_fig6_nobatch.sh   (compute node, venv active)
 set -u
 cd "$(dirname "$0")"
@@ -13,7 +12,6 @@ SERVER_SIF="${SERVER_SIF:-$TORPOR/images/torpor-server.sif}"
 CLIENT_SIF="${CLIENT_SIF:-$TORPOR/images/torpor-client-nobatch.sif}"
 echo "[$COLUMN] Using SERVER_SIF=$SERVER_SIF CLIENT_SIF=$CLIENT_SIF"
 
-# See ../common/model_loop.sh for why this is matched as a prefix.
 READY_PATTERN="Set I/O thread num"
 NUM_GPUS=4
 
@@ -38,7 +36,6 @@ trap cleanup_processes EXIT
 stash_logs() {  # $1 = model name
     local m="$1"
     mv "$OUTDIR/tmp_output_${m}.txt" "$OUTDIR/driver_output_${m}.txt" 2>/dev/null
-    # the driver runs with cwd fig6_nobatch/, so its client log lands there
     [ -e fig6_nobatch/log_client_0.txt ] && mv fig6_nobatch/log_client_0.txt "$OUTDIR/log_client_0_${m}.txt"
 }
 
@@ -52,7 +49,6 @@ for MODEL in "${MODELS[@]}"; do
 
     LOG_FILE="$OUTDIR/server_log_${MODEL}.txt"
 
-    # Remove a stale log so the readiness check cannot match old markers.
     rm -f "$LOG_FILE"
 
     apptainer exec --nv \
@@ -85,7 +81,6 @@ for MODEL in "${MODELS[@]}"; do
 
     echo -n "Running torpor_without_batch.py (model_name=$MODEL) inside $CLIENT_SIF ... "
 
-    # 30 min cap: bertqa's client startup is slow
     timeout -k 10 1800 taskset -c 48 apptainer exec \
         --bind /dev/shm/ipc:/cuda \
         --bind "$PWD:/workspace" \
