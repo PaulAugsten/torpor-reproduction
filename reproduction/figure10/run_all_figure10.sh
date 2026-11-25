@@ -2,9 +2,7 @@
 # Figure 10, all three bars at one function count: Native, Torpor, INFless-KA.
 # Native runs first because it generates the trace the others replay.
 # Usage: ./run_all_figure10.sh <FUNC_NUM>   (compute node, venv active)
-# Set KEEP_LOGS=1 to keep the logs of the previous run (sbatch_figure10.sh
-# does this for every count after the first). Export SERVER_SIF to use a
-# different server image for the Torpor bar.
+# Set KEEP_LOGS=1 to keep the logs of the previous run.
 set -u
 cd "$(dirname "$0")"
 FUNC_NUM=${1:?Usage: $0 <FUNC_NUM>}

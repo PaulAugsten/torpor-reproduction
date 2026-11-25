@@ -22,8 +22,6 @@ source "$TORPOR/venv/bin/activate"
 RESULTS_DIR="${RESULTS_ROOT:-$HOME/results}/figure_10"
 mkdir -p "$RESULTS_DIR"
 
-# Wipe the previous run's logs once here; the per-count run_all calls keep
-# them (log names contain the function count).
 rm -rf logs_fig10
 rm -f router.log server.log baseline.log ka.log router_stdout.log \
       log_cuda_server*.txt log_executor_*.txt log_client_*.txt client_*.log

@@ -18,20 +18,14 @@ logging.basicConfig(format='%(asctime)s.%(msecs)03d: %(message)s', datefmt='%Y-%
 # GPU id -> NUMA-local cores of a JURECA DC-GPU node; clients are pinned there.
 NUMA_CORES = {0: list(range(48, 64)), 1: list(range(16, 32)),
               2: list(range(112, 128)), 3: list(range(80, 96))}
-# Client endpoints listen on CLIENT_PORT_BASE + client_id. Upstream uses 9000,
-# which puts client 100 on port 9100, taken by node_exporter on JURECA nodes.
+# Original uses port 9000 + id; 9100 is taken by node_exporter on JURECA.
 CLIENT_PORT_BASE = int(os.environ.get('CLIENT_PORT_BASE', 20000))
 
 TORPOR = os.environ['TORPOR']
-CLIENT_SIF = os.environ.get('CLIENT_SIF',
-    f'{TORPOR}/images/torpor-client.sif')
 NATIVE_SIF = os.environ.get('NATIVE_SIF',
     f'{TORPOR}/images/torpor-native.sif')
-# Seconds a function is skipped after a request timeout. Upstream skips it for
-# the rest of the run.
+# Seconds a function is skipped after a timeout.
 UNHEALTHY_COOLDOWN = 10
-
-
 
 class SocketCache():
     def __init__(self, context):
@@ -130,7 +124,7 @@ class Router():
         self.launch_models(launch_batch)
         logging.info(f'Init launching {launch_batch}')
 
-        self.timeout_func = {}  # func_id -> timestamp it was last marked unhealthy
+        self.timeout_func = {}  # func_id -> time of its last timeout
         for i in range(server_num):
             reader_p = Process(target=container_manager, args=(i,))
             reader_p.start()

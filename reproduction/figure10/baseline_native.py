@@ -22,14 +22,10 @@ NATIVE_SIF = os.environ.get('NATIVE_SIF', f'{TORPOR}/images/torpor-native.sif')
 # Shared by figures 8, 9 and 10: log into logs_figN of the current directory.
 LOG_DIR = 'logs_' + os.path.basename(os.getcwd()).replace('figure', 'fig')
 os.makedirs(LOG_DIR, exist_ok=True)
-# Client endpoints listen on CLIENT_PORT_BASE + client_id. Upstream uses 9000,
-# which puts client 100 on port 9100, taken by node_exporter on JURECA nodes.
+# Original uses port 9000 + id; 9100 is taken by node_exporter on JURECA.
 CLIENT_PORT_BASE = int(os.environ.get('CLIENT_PORT_BASE', 20000))
 
-CLIENT_SIF = os.environ.get('CLIENT_SIF',
-    f'{TORPOR}/images/torpor-client.sif')
-# Seconds a function is skipped after a request timeout. Upstream skips it for
-# the rest of the run.
+# Seconds a function is skipped after a timeout.
 UNHEALTHY_COOLDOWN = 10
 
 class SocketCache():
@@ -125,8 +121,8 @@ class Router():
         self.func_num = actual_func_num
 
         # for server_id, model_id in launch_batch:
-            # os.system(f'docker run --gpus \'"device={server_id}"\' --cpus=1 -e OMP_NUM_THREADS=1 -e KMP_DUPLICATE_LIB_OK=TRUE -e model_name={model_name} --rm  --name client-{model_id}  --network=host --ipc=host standalone-native python endpoint.py {9000 + model_id} &')
-
+            # os.system(f'docker run --gpus \'"device={server_id}"\' --cpus=1 -e OMP_NUM_THREADS=1 -e KMP_DUPLICATE_LIB_OK=TRUE -e model_name={model_name} --rm  --name client-{model_id}  --network=host --ipc=host standalone-native python endpoint.py {9000 + model_id} &')    
+        
         batch_size = 10
         for i in range(0, len(launch_batch), batch_size):
             batch = launch_batch[i:i+batch_size]
@@ -147,7 +143,7 @@ class Router():
         self.pool = ThreadPoolExecutor(max_workers=2)
         self.sockets = SocketCache(self.context)
 
-        self.timeout_func = {}  # func_id -> timestamp it was last marked unhealthy
+        self.timeout_func = {}  # func_id -> time of its last timeout
         for i in range(server_num):
             reader_p = Process(target=container_manager, args=(i,))
             reader_p.start()
