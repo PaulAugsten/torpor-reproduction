@@ -2,8 +2,7 @@
 
 SLO compliance, i.e. the share of functions whose P98 latency is within 80 ms
 (CV models) or 200 ms (bertqa), at 320/400/480/560 functions over 8 mixed
-models (`router.py -m mixed`: function _i_ runs model _i_ mod 8 out of
-resnet50/101/152, densenet169/201, inception, efficientnet, bertqa). Each run
+models (resnet50/101/152, densenet169/201, inception, efficientnet, bertqa). Each run
 replays a 31-minute Azure-trace workload. Five variants differ in one knob:
 
 | Variant  | Paper name    | Change against Torpor              |
@@ -15,7 +14,7 @@ replays a 31-minute Azure-trace workload. Five variants differ in one knob:
 | `random` | Torpor-Random | server env `SCHEDULE_POLICY=RAND`  |
 
 `random` runs at 320 and 400 only, as annotated in the original
-`evaluation/figure11/Figure11_README.md` (override with `RANDOM_MAX_FUNC`).
+`evaluation/figure11/Figure11_README.md`.
 The trace is generated once per function count and cached as
 `../../tools/req_arrivals_<n>_31min_trace.npy`, so all variants at one count
 see the same requests.
@@ -56,11 +55,15 @@ them all):
 - Clients run in one shared Apptainer instance instead of `docker run`, each
   pinned to the cores local to its GPU (`NUMA_CORES`), on port
   `CLIENT_PORT_BASE + id` (20000 instead of 9000, see `../common/ports.sh`).
-- **Client loads are serialized** across the 4 GPU managers with a file lock.
+- Client loads are serialized across the 4 GPU managers with a file lock.
   The server's `ModelRepo` is a `std::map` shared by all GPUs without a lock,
   and concurrent loads corrupt it (`parameter ptr not found`, segfaults).
   `SERIAL_LOAD=0` turns the lock off.
-- The fixed 8 s wait after a client launch polls the client's port instead.
+- The fixed 8 s wait after a client launch is replaced by polling the
+  client's port.
+- The first request, which loads the model, times out after 120 s instead of
+  5 s (`LOAD_TIMEOUT`), so a slow load is not retried while it is still
+  running.
 - The sender finds `../../tools` relative to its own file, because it runs in
   the run directory.
 
@@ -70,11 +73,6 @@ them all):
 - `logs_fig11/<variant>_<n>f/`: every log of that run (`server.log`,
   `router.log`, `sender.log`, the server's own logs, `clients/`), and
   `FAILED.txt` if the run was aborted
-
-A run is aborted as soon as the server dies or `server.log` shows a crash, a
-CUDA assert or a `ModelRepo` lookup error (`FATAL_RE` in
-`run_fig11_variant.sh`). After a device-side assert the CUDA context is broken
-and every later output is garbage.
 
 The analyzer's "Total function count" is the number of functions in
 `router.log`, not FUNC_NUM.

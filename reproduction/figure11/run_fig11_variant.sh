@@ -79,8 +79,7 @@ rm -rf "$RUN_DIR" "$RESULT" && mkdir -p "$RUN_DIR/clients"
 ulimit -c 0
 ulimit -n "$(ulimit -Hn)"
 
-# 1. Server on all 4 GPUs. It writes its own logs to its cwd (/work = run dir);
-#    stdbuf gets crash messages into server.log right away.
+# 1. Server on all 4 GPUs. It writes its own logs to its cwd (/work = run dir)
 apptainer exec --nv --cleanenv \
     --bind /dev/shm/ipc:/cuda --bind "$RUN_DIR:/work" --pwd /work \
     --env MEM_LIMIT_IN_GB=25,IO_THREAD_NUM=4${EXTRA_SERVER_ENV} \
@@ -89,7 +88,6 @@ apptainer exec --nv --cleanenv \
     > "$RUN_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 
-# See ../common/model_loop.sh for why this is matched as a prefix.
 echo "Waiting for server readiness..."
 READY_SRV=0
 for i in $(seq 1 120); do
@@ -103,7 +101,6 @@ done
 echo "Server is ready."
 
 # 2. One Apptainer instance for all clients; router.py execs each client into it.
-#    Clients write log_client_<id>.txt to their cwd (/work = run dir/clients).
 apptainer instance start --cleanenv \
     --bind /dev/shm/ipc:/cuda --bind "$MODEL_DIR:/models:ro" --bind "$RUN_DIR/clients:/work" \
     "$CLIENT_SIF" "$CLIENT_INSTANCE" > "$RUN_DIR/client_instance.log" 2>&1 \

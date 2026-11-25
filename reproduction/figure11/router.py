@@ -129,7 +129,7 @@ def container_manager(server_id):
                     for attempt in range(4):
                         try:
                             x = requests.get('http://localhost:' + str(CLIENT_PORT_BASE + client_id), headers={"cur_server" : str(server_id), "batch_size": str(bert_batch_size if client_id in bert_function else batch_size_limit)}, timeout=LOAD_TIMEOUT)
-                            # x = requests.get('http://localhost:' + str(CLIENT_PORT_BASE + client_id), headers={"cur_server" : str(server_id), "batch_size": str(1)}, timeout=5)
+                            # x = requests.get('http://localhost:' + str(9000 + client_id), headers={"cur_server" : str(server_id), "batch_size": str(1)}, timeout=5)
                             logging.info(f'ExecuteAfterLoad {client_id} on server {server_id} resp: {x.text}')
                             router_pusher.send_pyobj(('0', client_id))
                         except:

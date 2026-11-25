@@ -28,7 +28,6 @@ FUNC_NUMS=("$@")
 RESULTS_DIR="${RESULTS_ROOT:-$HOME/results}/figure_11"
 mkdir -p "$RESULTS_DIR"
 
-# Model weights in node memory: faster client loads.
 export MODEL_DIR=/dev/shm/torpor_models
 trap 'rm -rf "$MODEL_DIR"' EXIT
 rm -rf "$MODEL_DIR" && mkdir -p "$MODEL_DIR"
