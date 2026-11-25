@@ -2,8 +2,7 @@
 
 All four columns run the same 8 models (densenet169/201, inception,
 efficientnet, resnet50/101/152, bertqa) and print a per-model
-`Latency avg` / `End2End avg` summary. General porting notes are in
-[`../README.md`](../README.md).
+`Latency avg` / `End2End avg` summary.
 
 ## Run everything
 
@@ -30,11 +29,11 @@ under a 30-minute timeout, records the result and tears everything down.
 Outputs: `results_<column>.txt` (summary) and `logs_<column>/` (server,
 client and driver logs per model).
 
-## Relation to upstream
+## Relation to original repo
 
-The three drivers are upstream's `evaluation2/table4/*.py` with the
+The three drivers are the original's `evaluation2/table4/*.py` with the
 `docker run` client launch replaced by `apptainer exec`.
-`run_figure4_native.py` is copied unchanged. Upstream builds the Swap-NVLink
+`run_figure4_native.py` is copied unchanged. The original builds the Swap-NVLink
 server by copying `evaluation2/table4/controller.hpp` into the container and
 recompiling; here that happens once when the image is built
 (`../images/torpor-server-nvlink.def`).
