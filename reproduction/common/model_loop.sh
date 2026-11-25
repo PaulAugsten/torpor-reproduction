@@ -1,6 +1,6 @@
 #!/bin/bash
 # Per-model test loop for Table 4 (remoting/swap columns), the Figure 6 Torpor
-# bar and the Figure 7 variants. Sourced, not executed, by the run_* scripts.
+# bar and the Figure 7 variants.
 #
 # The caller must set:
 #   COLUMN      short name, used for logs_${COLUMN}/ and results_${COLUMN}.txt
@@ -9,9 +9,6 @@
 # and may set:
 #   MODELS            array of models (default: the 8 Table 4 models)
 #   EXTRA_SERVER_ENV  appended to the server --env list, e.g. ",BUFFER_SIZE=1"
-#
-# Every model gets a fresh server. Cleanup runs before each model and on exit,
-# because a crashed run leaves processes holding GPU memory and IPC sockets.
 
 set -u
 
