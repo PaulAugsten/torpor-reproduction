@@ -11,7 +11,6 @@ TRACE_ID=${1:?Usage: $0 <TRACE_ID (e.g. -5)>}
 FUNC_NUM=40
 MINUTES=5
 SERVER_SIF="${SERVER_SIF:-$TORPOR/images/torpor-server.sif}"
-# Optional prefix for the server command, e.g. "numactl --interleave=all".
 SERVER_LAUNCH_PREFIX="${SERVER_LAUNCH_PREFIX:-}"
 echo "Using SERVER_SIF=$SERVER_SIF"
 [ -n "$SERVER_LAUNCH_PREFIX" ] && echo "Server launch prefix: $SERVER_LAUNCH_PREFIX"
@@ -41,8 +40,6 @@ rm -f "logs_fig9/torpor_trace${TRACE_ID}_result.txt"
 NODE_STATE="logs_fig9/torpor_trace${TRACE_ID}_nodestate.txt"
 : > "$NODE_STATE"
 
-# Record leftover processes and GPU state before each attempt. Processes from
-# the preceding run that are still winding down inflate the measured latency.
 record_node_state() {
     local leftovers
     leftovers=$(pgrep -af 'baseline_native.py|baseline_keepalive.py|router\.py|endpoint\.py|/server_bin/server' || true)
@@ -96,9 +93,6 @@ capture_placement() {
     } >> "$PLACEMENT" 2>&1
 }
 
-# The server can crash during model loading (see README). Nothing downstream
-# notices on its own, so check liveness at every step and print the first
-# registration-failure markers from the server log.
 server_alive() { kill -0 "$SERVER_PID" 2>/dev/null; }
 launch_failed() {
     echo "ERROR: server process died $1"
@@ -121,11 +115,9 @@ stash_failed_attempt() {
 }
 
 # Steps 1-3: start the server and load all FUNC_NUM functions.
-# Returns non-zero if that did not succeed.
 start_stack() {
     local i ready_srv=0 ready=0
 
-    # Remove stale logs so the readiness checks cannot match old markers.
     rm -f router.log server.log
     rm -f log_client_*.txt log_executor_*.txt log_cuda_server*.txt router_stdout.log
 
@@ -152,7 +144,7 @@ start_stack() {
     echo "Server is ready."
     sleep 5
 
-    # 2. Router; it launches the clients.
+    # 2. Router launches the clients.
     taskset -c 200 python3 router.py -m resnet152 -s 4 -f "$FUNC_NUM" -p sa > router_stdout.log 2>&1 &
     ROUTER_PID=$!
 
@@ -176,9 +168,6 @@ SETTLE_SECS="${SETTLE_SECS:-30}"
 echo "Settling ${SETTLE_SECS}s before start..."
 sleep "$SETTLE_SECS"
 
-# Retry the launch phase only. All crashes observed in Figure 9 happened
-# before the first trace request, so a retry cannot bias the measurement. A
-# crash during the replay still fails the run (step 4).
 LAUNCH_ATTEMPTS="${LAUNCH_ATTEMPTS:-5}"
 LAUNCHED=0
 for attempt in $(seq 1 "$LAUNCH_ATTEMPTS"); do
@@ -211,7 +200,6 @@ SAMPLER_PID=$!
 python3 sender_fix_rate.py "$FUNC_NUM" "$MINUTES" 0 "$TRACE_ID" || { kill "$SAMPLER_PID" 2>/dev/null; echo "sender failed"; exit 1; }
 kill "$SAMPLER_PID" 2>/dev/null; SAMPLER_PID=""
 capture_placement "replay finished"
-# A partial router.log would still parse into a plausible result.
 server_alive || { launch_failed "during the trace replay"; exit 1; }
 sleep 10
 

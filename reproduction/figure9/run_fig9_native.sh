@@ -1,10 +1,9 @@
 #!/bin/bash
 # Figure 9, Native run for one random trace.
-# Usage: ./run_fig9_native.sh <TRACE_ID>   (upstream labels: -5 -7 -1 -10)
+# Usage: ./run_fig9_native.sh <TRACE_ID>   (labels: -5 -7 -1 -10)
 # A negative rate makes sender_fix_rate.py draw random per-function rates
 # (Azure invocation pattern x10) and cache the trace as
 # ../../tools/req_arrivals_40_5_<TRACE_ID>.npy for the Torpor run.
-# pipefail so that a crashing analyzer is not hidden behind tee.
 set -u -o pipefail
 cd "$(dirname "$0")"
 source ../common/env.sh

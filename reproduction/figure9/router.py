@@ -22,15 +22,13 @@ CLIENT_SIF = os.environ.get('CLIENT_SIF',
     f'{TORPOR}/images/torpor-client.sif')
 os.makedirs('logs_fig9', exist_ok=True)
 
-# Client endpoints listen on CLIENT_PORT_BASE + client_id. Upstream uses 9000,
-# which puts client 100 on port 9100, taken by node_exporter on JURECA nodes.
+# Original uses port 9000 + id; 9100 is taken by node_exporter on JURECA.
 CLIENT_PORT_BASE = int(os.environ.get('CLIENT_PORT_BASE', 20000))
 
 bert_ddl = 0.2
 bert_function = set()
 bert_batch_size = 1
-# Seconds a function is skipped after a request timeout. Upstream skips it for
-# the rest of the run.
+# Seconds a function is skipped after a timeout.
 UNHEALTHY_COOLDOWN = 10
 
 class SocketCache():
@@ -112,7 +110,6 @@ def container_manager(server_id):
                             f'{CLIENT_SIF} bash /start_with_server_id.sh {client_id} {server_id} /endpoint.py {client_id + CLIENT_PORT_BASE} '
                             f'> logs_fig9/client_{client_id}.log 2>&1 &'
                         )
-                    
                     else:
                         core = NUMA_CORES[server_id][(client_id // server_num) % 16]
                         os.system(
@@ -206,7 +203,7 @@ class Router():
         self.schedule_queue = queue.Queue()
         self.pool = ThreadPoolExecutor(max_workers=2)
 
-        self.timeout_func = {}  # func_id -> timestamp it was last marked unhealthy
+        self.timeout_func = {}  # func_id -> time of its last timeout
         self.sockets = SocketCache(self.context)
         for i in range(server_num):
             reader_p = Process(target=container_manager, args=(i,))
@@ -587,8 +584,8 @@ if perform_launch:
     router = Router(server_num, func_num=args.l, sa_policy=is_sa_policy)
     for i in range(args.l, func_num):
         router.launch(i)
-        # Stagger client launches: lowers the rate of model-registration
-        # failures in the server (see README). Upstream has no pause here.
+        # Stagger launches to lower the rate of model-registration failures
+        # in the server (upstream: no pause).
         time.sleep(2)
 else:
     router = Router(server_num, func_num=func_num, sa_policy=is_sa_policy)

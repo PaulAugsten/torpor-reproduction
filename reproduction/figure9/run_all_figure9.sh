@@ -1,12 +1,9 @@
 #!/bin/bash
-# Figure 9, all runs: Native and Torpor over four random traces (upstream
-# labels -5, -7, -1, -10). Native runs first, as in the upstream README. Each
-# trace is generated once and cached in ../../tools, so Torpor replays exactly
-# the same requests. Both systems run in one job because Torpor's per-request
-# cost varies between jobs.
+# Figure 9, all runs: Native and Torpor over four random traces (labels -5, -7, -1, -10).
+# Each trace is generated once and cached in ../../tools, so Torpor replays exactly
+# the same requests.
 # Usage: ./run_all_figure9.sh   (compute node, venv active)
-# Set KEEP_LOGS=1 to keep the logs of the previous run. Export SERVER_SIF to
-# use a different server image for the Torpor runs.
+# Set KEEP_LOGS=1 to keep the logs of the previous run.
 set -u
 cd "$(dirname "$0")"
 

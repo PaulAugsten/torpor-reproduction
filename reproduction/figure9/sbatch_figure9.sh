@@ -36,8 +36,6 @@ if [ "$RC" -ne 0 ]; then
 fi
 
 if compgen -G "logs_fig9/*_result.txt" > /dev/null; then
-    # Keep only one job's results at the top level, so Native and Torpor rows
-    # from different jobs are never mixed. Older results move to previous/.
     if compgen -G "$RESULTS_DIR/*_result.txt" > /dev/null; then
         mkdir -p "$RESULTS_DIR/previous"
         mv "$RESULTS_DIR"/*_result.txt "$RESULTS_DIR/previous/"
