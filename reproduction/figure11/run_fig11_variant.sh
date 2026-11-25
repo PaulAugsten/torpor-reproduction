@@ -13,9 +13,8 @@ FUNC_NUM=${2:?Usage: $0 <torpor|fifo|block|lru|random> <FUNC_NUM>}
 MINUTES=31
 SERVER_SIF="${SERVER_SIF:-$TORPOR/images/torpor-server.sif}"
 CLIENT_SIF="${CLIENT_SIF:-$TORPOR/images/torpor-client.sif}"
-SERVER_BIN="${SERVER_BIN:-}"
 MODEL_DIR="${MODEL_DIR:-$TORPOR/models}"
-ROUTER_CORES=0-15                         
+ROUTER_CORES=0-15
 SENDER_CORES=32-39
 
 POLICY=sa
@@ -29,7 +28,6 @@ case "$VARIANT" in
     *) echo "ERROR: unknown variant '$VARIANT'"; exit 1 ;;
 esac
 echo "Using SERVER_SIF=$SERVER_SIF (variant=$VARIANT, policy=$POLICY, extra env='$EXTRA_SERVER_ENV')"
-[ -z "$SERVER_BIN" ] || echo "Using SERVER_BIN=$SERVER_BIN"
 
 RUN_DIR="$HERE/logs_fig11/${VARIANT}_${FUNC_NUM}f"
 RESULT="$HERE/logs_fig11/${VARIANT}_${FUNC_NUM}f_result.txt"
@@ -85,7 +83,6 @@ ulimit -n "$(ulimit -Hn)"
 #    stdbuf gets crash messages into server.log right away.
 apptainer exec --nv --cleanenv \
     --bind /dev/shm/ipc:/cuda --bind "$RUN_DIR:/work" --pwd /work \
-    ${SERVER_BIN:+--bind "$SERVER_BIN:/server_bin/server:ro"} \
     --env MEM_LIMIT_IN_GB=25,IO_THREAD_NUM=4${EXTRA_SERVER_ENV} \
     "$SERVER_SIF" \
     bash -c 'LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH LD_PRELOAD=/server_bin/libwapper.so exec stdbuf -oL -eL /server_bin/server' \
