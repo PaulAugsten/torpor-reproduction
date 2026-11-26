@@ -9,7 +9,7 @@ it is ported to Apptainer and Slurm and run on one JURECA DC-GPU node at the
 Jülich Supercomputing Centre (4x NVIDIA A100-40GB, 2x AMD EPYC 7742).
 
 - Authors: Paul Augsten (University of Cologne), Laurin Remane (University of Cologne; Figure 11)
-- Raw logs and result files: Zenodo, DOI: [10.5281/zenodo.24373401](https://doi.org/10.5281/zenodo.24373401)
+- Raw logs and result files: Zenodo, DOI: [10.5281/zenodo.24373400](https://doi.org/10.5281/zenodo.24373400)
 
 The upstream artifact contains only the single-node prototype, so the
 reproducible scope is Table 4 and Figures 6 to 11 (paper Sections 7.1 to 7.3).
@@ -135,7 +135,7 @@ The analyzers of Figures 8, 9 and 11 are upstream's, unchanged.
 ## Data
 
 The raw logs and result files of the reported runs are on Zenodo
-([10.5281/zenodo.24373401](https://doi.org/10.5281/zenodo.24373401)), organised by artifact. The authors' own logs, linked from the original figure READMEs, were used for comparison but are not redistributed.
+([10.5281/zenodo.24373400](https://doi.org/10.5281/zenodo.24373400)), organised by artifact. The authors' own logs, linked from the original figure READMEs, were used for comparison but are not redistributed.
 
 ## License
 
