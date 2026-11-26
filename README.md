@@ -3,9 +3,11 @@
 > **About this fork.** This fork adds a reproduction of the single-node
 > evaluation (Table 4, Figures 6 to 11) on an HPC cluster with Apptainer and
 > Slurm (JURECA, 4x NVIDIA A100). See
-> [`reproduction/README.md`](reproduction/README.md) for results, instructions
-> and all deviations. Apart from `reproduction/`, the only change to the
-> upstream artifact is a one-line fix in `include/server/model_repo.hpp`.
+> [`reproduction/README.md`](reproduction/README.md) for instructions
+> and all deviations. Apart from `reproduction/`, the only changes to the
+> upstream artifact are two one-line server fixes in
+> `include/server/model_repo.hpp` and `include/server/memory_manager.hpp`
+> (the latter also in `evaluation/figure7/test_scripts/memory_manager.hpp`).
 
 ### Introduction
 
